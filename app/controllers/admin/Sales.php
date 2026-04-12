@@ -705,7 +705,7 @@ class Sales extends MY_Controller
                 try {
                     $allPages[] = [
                         'group_key' => $group['group_key'],
-                        'page'      => $this->build_sale_pdf_compact_4up_page((int) $saleId),
+                        'page'      => $this->build_sale_pdf_page((int) $saleId),
                     ];
                 } catch (Throwable $saleBuildError) {
                     $this->register_facturadas_skip($skippedSales, (int) $saleId, 'cash', $dayDate, $saleBuildError, 'build');
@@ -1006,7 +1006,7 @@ class Sales extends MY_Controller
                     try {
                         $allPages[] = [
                             'group_key' => $this->build_facturadas_pdf_group_key((int) $warehouse->id, (string) $paymentMethod),
-                            'page'      => $this->build_sale_pdf_compact_4up_page($saleId),
+                            'page'      => $this->build_sale_pdf_page($saleId),
                         ];
                     } catch (Throwable $saleBuildError) {
                         $this->register_facturadas_skip($skippedSales, (int) $saleId, (string) $paymentMethod, (string) $dayDate, $saleBuildError, 'build');
@@ -1105,73 +1105,6 @@ class Sales extends MY_Controller
         return [
             'content' => $html_data,
             'footer'  => $this->data['biller']->invoice_footer,
-        ];
-    }
-
-    private function build_sale_pdf_compact_4up_page($id)
-    {
-        $this->data['error'] = validation_errors() ? validation_errors() : $this->session->flashdata('error');
-        $inv                 = $this->sales_model->getInvoiceByID($id);
-        if (!$inv) {
-            throw new RuntimeException('Venta no encontrada para generar PDF compacto.');
-        }
-        if (!$this->session->userdata('view_right')) {
-            $this->sma->view_rights($inv->created_by);
-        }
-
-        $customer  = $this->site->getCompanyByID($inv->customer_id);
-        $warehouse = $this->site->getWarehouseByID($inv->warehouse_id);
-        $rows      = $this->sales_model->getAllInvoiceItems($id);
-        $payments  = $this->sales_model->getPaymentsForSale($id);
-
-        $productLimit = 6;
-        $products = [];
-        foreach ((array) $rows as $row) {
-            $products[] = [
-                'name'     => trim((string) ($row->product_name ?? '')),
-                'quantity' => (float) ($row->quantity ?? 0),
-            ];
-        }
-
-        $visibleProducts = array_slice($products, 0, $productLimit);
-        $extraProducts   = max(0, count($products) - count($visibleProducts));
-
-        $paymentMethodLabel = '';
-        if (!empty($inv->payment_method)) {
-            $paymentMethodLabel = lang((string) $inv->payment_method);
-            if ($paymentMethodLabel === (string) $inv->payment_method) {
-                $paymentMethodLabel = ucfirst((string) $inv->payment_method);
-            }
-        } elseif (!empty($payments)) {
-            $labels = [];
-            foreach ($payments as $payment) {
-                $paidBy = trim((string) $payment->paid_by);
-                if ($paidBy === '') {
-                    continue;
-                }
-                $label = lang($paidBy);
-                $labels[] = $label !== $paidBy ? $label : ucfirst($paidBy);
-            }
-            $labels = array_values(array_unique($labels));
-            $paymentMethodLabel = implode(', ', $labels);
-        }
-
-        $compactData = [
-            'inv'               => $inv,
-            'customer'          => $customer,
-            'warehouse'         => $warehouse,
-            'product_lines'     => $visibleProducts,
-            'extra_products'    => $extraProducts,
-            'payment_method'    => $paymentMethodLabel,
-            'show_qr'           => $extraProducts === 0 && count($visibleProducts) <= 5,
-            'compact_total'     => $this->sma->formatMoney($inv->grand_total),
-        ];
-
-        $html_data = $this->load->view($this->theme . 'sales/pdf_sale_compact_4up', $compactData, true);
-
-        return [
-            'content' => $html_data,
-            'footer'  => '',
         ];
     }
 
@@ -1377,7 +1310,7 @@ class Sales extends MY_Controller
 
                 for ($tileIndex = 0; $tileIndex < 4; $tileIndex++) {
                     if (isset($chunk[$tileIndex])) {
-                        $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-content">' . $chunk[$tileIndex] . '</div></div>';
+                        $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-content"><div class="facturadas-tile-scale">' . $chunk[$tileIndex] . '</div></div></div>';
                     } else {
                         $sheetsHtml .= '<div class="facturadas-tile facturadas-tile-empty"><div class="facturadas-tile-content"></div></div>';
                     }
@@ -1395,24 +1328,11 @@ class Sales extends MY_Controller
         $layoutCss = '<style>'
             . '@page { size: A4 portrait; margin: 8mm; }'
             . 'html, body { margin: 0; padding: 0; }'
-            . '.facturadas-sheet { width: 194mm; height: 281mm; box-sizing: border-box; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2.2mm; page-break-inside: avoid; }'
-            . '.facturadas-tile { box-sizing: border-box; overflow: hidden; min-width: 0; min-height: 0; }'
-            . '.facturadas-tile-content { width: 100%; height: 100%; overflow: hidden; page-break-inside: avoid; }'
-            . '.facturadas-compact-card { box-sizing: border-box; width: 100%; height: 100%; border: 0.3mm solid #999; border-radius: 1.2mm; padding: 2.4mm; font-family: DejaVu Sans, Arial, sans-serif; font-size: 9.2px; line-height: 1.25; page-break-inside: avoid; }'
-            . '.facturadas-compact-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 2mm; margin-bottom: 1.4mm; }'
-            . '.facturadas-compact-title { font-size: 11px; font-weight: 700; }'
-            . '.facturadas-compact-ref { font-size: 9px; font-weight: 700; text-align: right; }'
-            . '.facturadas-compact-grid { width: 100%; border-collapse: collapse; margin-bottom: 1.4mm; }'
-            . '.facturadas-compact-grid td { vertical-align: top; padding: 0.3mm 0; }'
-            . '.facturadas-compact-label { color: #555; font-weight: 700; white-space: nowrap; padding-right: 1.5mm; }'
-            . '.facturadas-compact-products { border-top: 0.2mm solid #bbb; margin-top: 1mm; padding-top: 1mm; }'
-            . '.facturadas-compact-products-title { font-weight: 700; margin-bottom: 0.6mm; }'
-            . '.facturadas-compact-products ul { margin: 0; padding-left: 3.7mm; }'
-            . '.facturadas-compact-products li { margin: 0 0 0.35mm 0; }'
-            . '.facturadas-compact-extra { font-style: italic; color: #333; margin-top: 0.5mm; }'
-            . '.facturadas-compact-footer { margin-top: 0.9mm; display: flex; justify-content: space-between; align-items: flex-end; gap: 2mm; }'
-            . '.facturadas-compact-total { font-size: 11px; font-weight: 700; }'
-            . '.facturadas-compact-qr svg, .facturadas-compact-qr img { width: 16mm; height: 16mm; }'
+            . '.facturadas-sheet { width: 194mm; height: 281mm; display: flex; flex-wrap: wrap; align-content: stretch; box-sizing: border-box; page-break-inside: avoid; }'
+            . '.facturadas-tile { width: 50%; height: 50%; box-sizing: border-box; overflow: hidden; padding: 3mm; }'
+            . '.facturadas-tile-content { width: 100%; height: 100%; overflow: hidden; }'
+            . '.facturadas-tile-scale { width: 208%; transform: scale(0.48); transform-origin: top left; }'
+            . '.facturadas-tile-empty .facturadas-tile-scale { display: none; }'
             . '</style>';
 
         return '<!DOCTYPE html><html><head><meta charset="utf-8">' . implode('', array_values($assets)) . $layoutCss . '</head><body>' . $sheetsHtml . '</body></html>';
