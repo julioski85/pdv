@@ -18,7 +18,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 | environments.
 |
 */
-$config['base_url'] = 'https://pos2.hytechpos.com/';
+$config['base_url'] = 'https://biomaussancdmx.com/carlos';
 
 /*
 |--------------------------------------------------------------------------
