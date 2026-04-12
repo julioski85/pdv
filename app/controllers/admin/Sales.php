@@ -690,20 +690,26 @@ class Sales extends MY_Controller
         $dayDate = sprintf('%04d-%02d-%02d', $year, $month, $day);
         $periodStart = $dayDate . ' 00:00:00';
         $periodEnd   = $dayDate . ' 23:59:59';
-        $saleIds = $this->get_facturadas_cash_sale_ids($periodStart, $periodEnd);
+        $warehouses = $this->resolve_facturadas_warehouses($periodStart, $periodEnd);
+        $cashBuckets = $this->get_facturadas_cash_sales_buckets($periodStart, $periodEnd, $warehouses);
 
-        if (empty($saleIds)) {
+        if (empty($cashBuckets)) {
             $this->session->set_flashdata('warning', 'No se encontraron ventas de efectivo para el día seleccionado.');
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 
         $allPages = [];
         $skippedSales = [];
-        foreach ($saleIds as $saleId) {
-            try {
-                $allPages[] = $this->build_sale_pdf_page((int) $saleId);
-            } catch (Throwable $saleBuildError) {
-                $this->register_facturadas_skip($skippedSales, (int) $saleId, 'cash', $dayDate, $saleBuildError, 'build');
+        foreach ($cashBuckets as $group) {
+            foreach ($group['sale_ids'] as $saleId) {
+                try {
+                    $allPages[] = [
+                        'group_key' => $group['group_key'],
+                        'page'      => $this->build_sale_pdf_page((int) $saleId),
+                    ];
+                } catch (Throwable $saleBuildError) {
+                    $this->register_facturadas_skip($skippedSales, (int) $saleId, 'cash', $dayDate, $saleBuildError, 'build');
+                }
             }
         }
 
@@ -717,7 +723,7 @@ class Sales extends MY_Controller
         $validPages = $allPages;
 
         try {
-            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+            $this->sma->generate_pdf($this->build_facturadas_grouped_pdf_content($validPages), $tmpPdfPath, 'F');
         } catch (Throwable $batchRenderError) {
             log_message('error', 'Ventas efectivo PDF diario: fallo render por lote, se intenta por venta. day=' . $dayDate . ' error=' . $this->build_facturadas_error_snippet($batchRenderError));
             if (is_file($tmpPdfPath)) {
@@ -725,14 +731,14 @@ class Sales extends MY_Controller
             }
 
             $validPages = [];
-            foreach ($allPages as $index => $page) {
+            foreach ($allPages as $index => $entry) {
                 $probePdfPath = $tmpDir . '/ventas_efectivo_probe_' . uniqid() . '.pdf';
                 try {
-                    $this->sma->generate_pdf([$page], $probePdfPath, 'F');
+                    $this->sma->generate_pdf([$entry['page']], $probePdfPath, 'F');
                     if (!is_file($probePdfPath) || @filesize($probePdfPath) === 0) {
                         throw new RuntimeException('PDF temporal vacío al validar venta de efectivo.');
                     }
-                    $validPages[] = $page;
+                    $validPages[] = $entry;
                 } catch (Throwable $saleRenderError) {
                     log_message('error', 'Ventas efectivo PDF diario: venta omitida durante validación individual. day=' . $dayDate . ' index=' . $index . ' error=' . $this->build_facturadas_error_snippet($saleRenderError));
                 } finally {
@@ -747,7 +753,7 @@ class Sales extends MY_Controller
                 admin_redirect('sales/ventas_facturadas_pdf');
             }
 
-            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+            $this->sma->generate_pdf($this->build_facturadas_grouped_pdf_content($validPages), $tmpPdfPath, 'F');
         }
 
         if (!is_file($tmpPdfPath) || @filesize($tmpPdfPath) === 0) {
@@ -998,7 +1004,10 @@ class Sales extends MY_Controller
                 log_message('debug', 'Ventas facturadas PDF diario: procesando warehouse_id=' . (int) $warehouse->id . ' warehouse_code=' . (string) $warehouse->code . ' warehouse_name=' . (string) $warehouse->name . ' paid_by=' . (string) $paymentMethod . ' sales=' . count($saleIds));
                 foreach ($saleIds as $saleId) {
                     try {
-                        $allPages[] = $this->build_sale_pdf_page($saleId);
+                        $allPages[] = [
+                            'group_key' => $this->build_facturadas_pdf_group_key((int) $warehouse->id, (string) $paymentMethod),
+                            'page'      => $this->build_sale_pdf_page($saleId),
+                        ];
                     } catch (Throwable $saleBuildError) {
                         $this->register_facturadas_skip($skippedSales, (int) $saleId, (string) $paymentMethod, (string) $dayDate, $saleBuildError, 'build');
                     }
@@ -1016,7 +1025,7 @@ class Sales extends MY_Controller
         $validPages = $allPages;
 
         try {
-            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+            $this->sma->generate_pdf($this->build_facturadas_grouped_pdf_content($validPages), $tmpPdfPath, 'F');
         } catch (Throwable $batchRenderError) {
             log_message('error', 'Ventas facturadas PDF diario: fallo render por lote, se intenta por venta. day=' . $dayDate . ' error=' . $this->build_facturadas_error_snippet($batchRenderError));
             if (is_file($tmpPdfPath)) {
@@ -1024,14 +1033,14 @@ class Sales extends MY_Controller
             }
 
             $validPages = [];
-            foreach ($allPages as $index => $page) {
+            foreach ($allPages as $index => $entry) {
                 $probePdfPath = $tmpDir . '/ventas_facturadas_diario_probe_' . uniqid() . '.pdf';
                 try {
-                    $this->sma->generate_pdf([$page], $probePdfPath, 'F');
+                    $this->sma->generate_pdf([$entry['page']], $probePdfPath, 'F');
                     if (!is_file($probePdfPath) || @filesize($probePdfPath) === 0) {
                         throw new RuntimeException('PDF temporal vacío al validar venta.');
                     }
-                    $validPages[] = $page;
+                    $validPages[] = $entry;
                 } catch (Throwable $saleRenderError) {
                     log_message('error', 'Ventas facturadas PDF diario: venta omitida durante validación individual. day=' . $dayDate . ' index=' . $index . ' error=' . $this->build_facturadas_error_snippet($saleRenderError));
                 } finally {
@@ -1046,7 +1055,7 @@ class Sales extends MY_Controller
                 admin_redirect('sales/ventas_facturadas_pdf');
             }
 
-            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+            $this->sma->generate_pdf($this->build_facturadas_grouped_pdf_content($validPages), $tmpPdfPath, 'F');
         }
 
         if (!is_file($tmpPdfPath) || @filesize($tmpPdfPath) === 0) {
@@ -1204,10 +1213,15 @@ class Sales extends MY_Controller
         return 'TRANSFERENCIA';
     }
 
-    private function get_facturadas_cash_sale_ids($periodStart, $periodEnd)
+    private function get_facturadas_cash_sales_buckets($periodStart, $periodEnd, $warehouses)
     {
+        $warehouseOrder = [];
+        foreach ($warehouses as $rank => $warehouse) {
+            $warehouseOrder[(int) $warehouse->id] = $rank;
+        }
+
         $rows = $this->db
-            ->select('DISTINCT(s.id) as sale_id', false)
+            ->select('DISTINCT(s.id) as sale_id, s.warehouse_id', false)
             ->from('sales s')
             ->join('payments p', 'p.sale_id = s.id', 'inner')
             ->where('s.pos', 1)
@@ -1221,12 +1235,62 @@ class Sales extends MY_Controller
             ->get()
             ->result();
 
-        $saleIds = [];
+        $buckets = [];
         foreach ($rows as $row) {
-            $saleIds[] = (int) $row->sale_id;
+            $warehouseId = (int) $row->warehouse_id;
+            $groupKey = $this->build_facturadas_pdf_group_key($warehouseId, 'cash');
+            if (!isset($buckets[$groupKey])) {
+                $buckets[$groupKey] = [
+                    'warehouse_id' => $warehouseId,
+                    'group_key'    => $groupKey,
+                    'sale_ids'     => [],
+                ];
+            }
+            $buckets[$groupKey]['sale_ids'][] = (int) $row->sale_id;
         }
 
-        return $saleIds;
+        uasort($buckets, function ($a, $b) use ($warehouseOrder) {
+            $rankA = $warehouseOrder[$a['warehouse_id']] ?? PHP_INT_MAX;
+            $rankB = $warehouseOrder[$b['warehouse_id']] ?? PHP_INT_MAX;
+            if ($rankA === $rankB) {
+                return $a['warehouse_id'] <=> $b['warehouse_id'];
+            }
+
+            return $rankA <=> $rankB;
+        });
+
+        return array_values($buckets);
+    }
+
+    private function build_facturadas_pdf_group_key($warehouseId, $paymentMethod)
+    {
+        return (int) $warehouseId . '|' . strtolower(trim((string) $paymentMethod));
+    }
+
+    private function build_facturadas_grouped_pdf_content($groupedPages)
+    {
+        $html = '';
+        $previousGroupKey = null;
+
+        foreach ($groupedPages as $entry) {
+            if (!isset($entry['page']) || !is_array($entry['page']) || !isset($entry['page']['content'])) {
+                continue;
+            }
+
+            $currentGroupKey = (string) ($entry['group_key'] ?? '');
+            if ($html !== '' && $previousGroupKey !== null && $currentGroupKey !== '' && $currentGroupKey !== $previousGroupKey) {
+                $html .= '<div style="page-break-before: always;"></div>';
+            }
+
+            $html .= (string) $entry['page']['content'];
+            $previousGroupKey = $currentGroupKey;
+        }
+
+        if (trim($html) === '') {
+            throw new RuntimeException('No hay contenido HTML válido para renderizar PDF por grupos.');
+        }
+
+        return $html;
     }
 
     private function build_facturadas_warehouse_order_map()
