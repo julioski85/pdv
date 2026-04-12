@@ -249,6 +249,11 @@
                             </a>
                         </li>
                         <li>
+                            <a href="<?=admin_url('sales/ventas_facturadas_pdf')?>">
+                                <i class="fa fa-file-archive-o"></i> Ventas facturadas PDF
+                            </a>
+                        </li>
+                        <li>
                             <a href="#" id="excel" data-action="export_excel">
                                 <i class="fa fa-file-excel-o"></i> <?=lang('export_to_excel')?>
                             </a>

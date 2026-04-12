@@ -4,6 +4,23 @@ defined('BASEPATH') or exit('No direct script access allowed');
 
 class Sales extends MY_Controller
 {
+    private $facturadas_warehouse_order = [
+        ['code' => 'TLA', 'label' => '01_TLALPAN'],
+        ['code' => 'BAL', 'label' => '02_BALBUENA'],
+        ['code' => 'INS', 'label' => '03_INSURGENTES'],
+        ['code' => 'AJU', 'label' => '04_PICACHO_AJUSCO'],
+        ['code' => 'SJM', 'label' => '05_SAN_JERONIMO'],
+        ['code' => 'PC', 'label' => '06_PIE_DE_LA_CUESTA'],
+        ['code' => 'TQ', 'label' => '07_TAQ'],
+        ['code' => 'COAP', 'label' => '08_COAPA'],
+    ];
+
+    private $facturadas_payment_files = [
+        'debit' => '01_DEBITO.pdf',
+        'cc'    => '02_CREDITO.pdf',
+        'other' => '03_TRANSFERENCIA.pdf',
+    ];
+
     public function __construct()
     {
         parent::__construct();
@@ -583,34 +600,203 @@ class Sales extends MY_Controller
         $this->sma->checkPermissions('pdf');
 
         foreach ($sales_id as $id) {
-            $this->data['error'] = (validation_errors()) ? validation_errors() : $this->session->flashdata('error');
-            $inv                 = $this->sales_model->getInvoiceByID($id);
-            if (!$this->session->userdata('view_right')) {
-                $this->sma->view_rights($inv->created_by);
-            }
-            $this->data['barcode']     = "<img src='" . admin_url('products/gen_barcode/' . $inv->reference_no) . "' alt='" . $inv->reference_no . "' class='pull-left' />";
-            $this->data['customer']    = $this->site->getCompanyByID($inv->customer_id);
-            $this->data['payments']    = $this->sales_model->getPaymentsForSale($id);
-            $this->data['biller']      = $this->site->getCompanyByID($inv->biller_id);
-            $this->data['user']        = $this->site->getUser($inv->created_by);
-            $this->data['warehouse']   = $this->site->getWarehouseByID($inv->warehouse_id);
-            $this->data['inv']         = $inv;
-            $this->data['rows']        = $this->sales_model->getAllInvoiceItems($id);
-            $this->data['return_sale'] = $inv->return_id ? $this->sales_model->getInvoiceByID($inv->return_id) : null;
-            $this->data['return_rows'] = $inv->return_id ? $this->sales_model->getAllInvoiceItems($inv->return_id) : null;
-            $html_data                 = $this->load->view($this->theme . 'sales/pdf', $this->data, true);
-            if (!$this->Settings->barcode_img) {
-                $html_data = preg_replace("'\<\?xml(.*)\?\>'", '', $html_data);
-            }
-
-            $html[] = [
-                'content' => $html_data,
-                'footer'  => $this->data['biller']->invoice_footer,
-            ];
+            $html[] = $this->build_sale_pdf_page($id);
         }
 
         $name = lang('sales') . '.pdf';
         $this->sma->generate_pdf($html, $name);
+    }
+
+    public function ventas_facturadas_pdf()
+    {
+        $this->sma->checkPermissions();
+
+        $this->data['error'] = validation_errors() ? validation_errors() : $this->session->flashdata('error');
+        $this->data['years'] = range((int) date('Y'), (int) date('Y') - 5);
+        $this->data['selected_year'] = $this->input->post('year') ? (int) $this->input->post('year') : (int) date('Y');
+        $this->data['selected_month'] = $this->input->post('month') ? (int) $this->input->post('month') : (int) date('m');
+
+        $bc   = [['link' => base_url(), 'page' => lang('home')], ['link' => admin_url('sales'), 'page' => lang('sales')], ['link' => '#', 'page' => 'Ventas facturadas PDF']];
+        $meta = ['page_title' => 'Ventas facturadas PDF', 'bc' => $bc];
+        $this->page_construct('sales/ventas_facturadas_pdf', $meta, $this->data);
+    }
+
+    public function generar_ventas_facturadas_pdf()
+    {
+        $this->sma->checkPermissions('pdf');
+        $year  = (int) $this->input->post('year');
+        $month = (int) $this->input->post('month');
+        if ($year < 2000 || $year > 2100 || $month < 1 || $month > 12) {
+            $this->session->set_flashdata('error', 'Periodo inválido.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $periodStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
+        $periodEnd   = date('Y-m-t 23:59:59', strtotime($periodStart));
+        $periodLabel = sprintf('%04d-%02d', $year, $month);
+        $daysInMonth = (int) date('t', strtotime($periodStart));
+
+        $paymentOrder = $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
+        $warehouses   = $this->resolve_facturadas_warehouses();
+
+        $zipPath = sys_get_temp_dir() . '/ventas_facturadas_' . $periodLabel . '_' . uniqid() . '.zip';
+        $zip     = new ZipArchive();
+        if (true !== $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
+            $this->session->set_flashdata('error', 'No fue posible crear el ZIP.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $generated = 0;
+        for ($day = 1; $day <= $daysInMonth; $day++) {
+            $dayLabel = sprintf('%02d', $day);
+            $dayDate  = sprintf('%04d-%02d-%02d', $year, $month, $day);
+
+            foreach ($warehouses as $warehouse) {
+                foreach ($paymentOrder as $paymentMethod => $fileName) {
+                    $saleIds = $this->get_facturadas_sale_ids($dayDate, $warehouse->id, $paymentMethod);
+                    if (empty($saleIds)) {
+                        continue;
+                    }
+
+                    $pages = [];
+                    foreach ($saleIds as $saleId) {
+                        $pages[] = $this->build_sale_pdf_page($saleId);
+                    }
+                    $pdfContent = $this->sma->generate_pdf($pages, $fileName, 'S');
+                    if (!$pdfContent) {
+                        continue;
+                    }
+
+                    $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
+                    $zip->addFromString($zipFilePath, $pdfContent);
+                    $generated++;
+                }
+            }
+        }
+
+        $zip->close();
+        if ($generated === 0) {
+            @unlink($zipPath);
+            $this->session->set_flashdata('warning', 'No se encontraron ventas facturadas para el periodo seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $this->load->helper('download');
+        $zipName = 'ventas_facturadas_' . $periodLabel . '.zip';
+        $zipData = file_get_contents($zipPath);
+        @unlink($zipPath);
+        force_download($zipName, $zipData);
+    }
+
+    private function build_sale_pdf_page($id)
+    {
+        $this->data['error'] = validation_errors() ? validation_errors() : $this->session->flashdata('error');
+        $inv                 = $this->sales_model->getInvoiceByID($id);
+        if (!$this->session->userdata('view_right')) {
+            $this->sma->view_rights($inv->created_by);
+        }
+        $this->data['barcode']     = "<img src='" . admin_url('products/gen_barcode/' . $inv->reference_no) . "' alt='" . $inv->reference_no . "' class='pull-left' />";
+        $this->data['customer']    = $this->site->getCompanyByID($inv->customer_id);
+        $this->data['payments']    = $this->sales_model->getPaymentsForSale($id);
+        $this->data['biller']      = $this->site->getCompanyByID($inv->biller_id);
+        $this->data['user']        = $this->site->getUser($inv->created_by);
+        $this->data['warehouse']   = $this->site->getWarehouseByID($inv->warehouse_id);
+        $this->data['inv']         = $inv;
+        $this->data['rows']        = $this->sales_model->getAllInvoiceItems($id);
+        $this->data['return_sale'] = $inv->return_id ? $this->sales_model->getInvoiceByID($inv->return_id) : null;
+        $this->data['return_rows'] = $inv->return_id ? $this->sales_model->getAllInvoiceItems($inv->return_id) : null;
+        $html_data                 = $this->load->view($this->theme . 'sales/pdf', $this->data, true);
+        if (!$this->Settings->barcode_img) {
+            $html_data = preg_replace("'\<\?xml(.*)\?\>'", '', $html_data);
+        }
+
+        return [
+            'content' => $html_data,
+            'footer'  => $this->data['biller']->invoice_footer,
+        ];
+    }
+
+    private function resolve_facturadas_warehouses()
+    {
+        $warehouseMap = [];
+        foreach ($this->site->getAllWarehouses() as $warehouse) {
+            $warehouseMap[$warehouse->code] = $warehouse;
+        }
+
+        $result = [];
+        foreach ($this->facturadas_warehouse_order as $item) {
+            if (!isset($warehouseMap[$item['code']])) {
+                continue;
+            }
+            $warehouse = $warehouseMap[$item['code']];
+            $warehouse->folder_label = $item['label'];
+            $result[] = $warehouse;
+        }
+
+        return $result;
+    }
+
+    private function resolve_facturadas_payment_order($periodStart, $periodEnd)
+    {
+        $paymentOrder = $this->facturadas_payment_files;
+        $cashMethod   = null;
+
+        $rows = $this->db
+            ->select('DISTINCT(p.paid_by) as paid_by', false)
+            ->from('sales s')
+            ->join('payments p', 'p.sale_id = s.id', 'inner')
+            ->where('s.pos', 1)
+            ->where('s.date >=', $periodStart)
+            ->where('s.date <=', $periodEnd)
+            ->where('s.factura_id IS NOT NULL', null, false)
+            ->where("TRIM(s.factura_id) !=", '')
+            ->get()
+            ->result();
+
+        foreach ($rows as $row) {
+            $paidBy = trim((string) $row->paid_by);
+            if ($paidBy === '') {
+                continue;
+            }
+            $normalized = strtolower($paidBy);
+            if ($normalized === 'efectivo' || $normalized === 'cash') {
+                $cashMethod = $paidBy;
+                break;
+            }
+        }
+
+        if ($cashMethod) {
+            $paymentOrder[$cashMethod] = '04_EFECTIVO.pdf';
+        } else {
+            $paymentOrder['cash'] = '04_EFECTIVO.pdf';
+        }
+
+        return $paymentOrder;
+    }
+
+    private function get_facturadas_sale_ids($dayDate, $warehouseId, $paymentMethod)
+    {
+        $rows = $this->db
+            ->select('DISTINCT(s.id) as id', false)
+            ->from('sales s')
+            ->join('payments p', 'p.sale_id = s.id', 'inner')
+            ->where('s.pos', 1)
+            ->where('s.warehouse_id', $warehouseId)
+            ->where('DATE(s.date)', $dayDate)
+            ->where('p.paid_by', $paymentMethod)
+            ->where('s.factura_id IS NOT NULL', null, false)
+            ->where("TRIM(s.factura_id) !=", '')
+            ->order_by('s.date', 'asc')
+            ->order_by('s.id', 'asc')
+            ->get()
+            ->result();
+
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int) $row->id;
+        }
+
+        return $ids;
     }
 
     /* ------------------------------- */
