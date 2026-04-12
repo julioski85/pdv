@@ -1271,30 +1271,8 @@ class Sales extends MY_Controller
     {
         $assets = [];
         $sheetsHtml = '';
-        $previousGroupKey = null;
-        $currentSheetTiles = [];
-        $currentSheetGroupKey = null;
-        $sheetCount = 0;
-
-        $flushSheet = function () use (&$sheetsHtml, &$currentSheetTiles, &$sheetCount) {
-            if (empty($currentSheetTiles)) {
-                return;
-            }
-
-            $sheetStyles = [];
-            if ($sheetCount > 0) {
-                $sheetStyles[] = 'page-break-before: always';
-            }
-
-            $sheetsHtml .= '<div class="facturadas-sheet"' . (!empty($sheetStyles) ? ' style="' . implode('; ', $sheetStyles) . '"' : '') . '>';
-            foreach ($currentSheetTiles as $tileHtml) {
-                $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-scale">' . $tileHtml . '</div></div>';
-            }
-            $sheetsHtml .= '</div>';
-
-            $currentSheetTiles = [];
-            $sheetCount++;
-        };
+        $groupedTiles = [];
+        $groupOrder = [];
 
         foreach ($groupedPages as $entry) {
             if (!isset($entry['page']) || !is_array($entry['page']) || !isset($entry['page']['content'])) {
@@ -1311,36 +1289,50 @@ class Sales extends MY_Controller
             }
 
             $currentGroupKey = (string) ($entry['group_key'] ?? '');
-            if ($currentSheetGroupKey === null) {
-                $currentSheetGroupKey = $currentGroupKey;
+            if (!isset($groupedTiles[$currentGroupKey])) {
+                $groupedTiles[$currentGroupKey] = [];
+                $groupOrder[] = $currentGroupKey;
             }
-
-            if ($previousGroupKey !== null && $currentGroupKey !== $previousGroupKey) {
-                $flushSheet();
-                $currentSheetGroupKey = $currentGroupKey;
-            }
-
-            if (count($currentSheetTiles) >= 4 || $currentGroupKey !== $currentSheetGroupKey) {
-                $flushSheet();
-                $currentSheetGroupKey = $currentGroupKey;
-            }
-
-            $currentSheetTiles[] = $parts['body'];
-            $previousGroupKey = $currentGroupKey;
+            $groupedTiles[$currentGroupKey][] = $parts['body'];
         }
 
-        $flushSheet();
+        $sheetCount = 0;
+        foreach ($groupOrder as $groupKey) {
+            $tiles = $groupedTiles[$groupKey] ?? [];
+            if (empty($tiles)) {
+                continue;
+            }
+
+            $chunks = array_chunk($tiles, 4);
+            foreach ($chunks as $chunk) {
+                $sheetStyle = $sheetCount > 0 ? ' style="page-break-before: always;"' : '';
+                $sheetsHtml .= '<div class="facturadas-sheet"' . $sheetStyle . '>';
+
+                for ($tileIndex = 0; $tileIndex < 4; $tileIndex++) {
+                    if (isset($chunk[$tileIndex])) {
+                        $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-content"><div class="facturadas-tile-scale">' . $chunk[$tileIndex] . '</div></div></div>';
+                    } else {
+                        $sheetsHtml .= '<div class="facturadas-tile facturadas-tile-empty"><div class="facturadas-tile-content"></div></div>';
+                    }
+                }
+
+                $sheetsHtml .= '</div>';
+                $sheetCount++;
+            }
+        }
 
         if (trim($sheetsHtml) === '') {
             throw new RuntimeException('No hay contenido HTML válido para renderizar PDF por grupos.');
         }
 
         $layoutCss = '<style>'
-            . '@page { margin: 8mm; }'
+            . '@page { size: A4 portrait; margin: 8mm; }'
             . 'html, body { margin: 0; padding: 0; }'
-            . '.facturadas-sheet { width: 100%; height: 100%; display: table; table-layout: fixed; }'
-            . '.facturadas-tile { width: 50%; height: 50%; display: inline-block; vertical-align: top; box-sizing: border-box; overflow: hidden; padding: 3mm; }'
+            . '.facturadas-sheet { width: 194mm; height: 281mm; display: flex; flex-wrap: wrap; align-content: stretch; box-sizing: border-box; page-break-inside: avoid; }'
+            . '.facturadas-tile { width: 50%; height: 50%; box-sizing: border-box; overflow: hidden; padding: 3mm; }'
+            . '.facturadas-tile-content { width: 100%; height: 100%; overflow: hidden; }'
             . '.facturadas-tile-scale { width: 208%; transform: scale(0.48); transform-origin: top left; }'
+            . '.facturadas-tile-empty .facturadas-tile-scale { display: none; }'
             . '</style>';
 
         return '<!DOCTYPE html><html><head><meta charset="utf-8">' . implode('', array_values($assets)) . $layoutCss . '</head><body>' . $sheetsHtml . '</body></html>';
