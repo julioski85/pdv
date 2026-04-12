@@ -16,9 +16,9 @@ class Sales extends MY_Controller
     ];
 
     private $facturadas_payment_files = [
-        'debit' => '01_DEBITO.pdf',
-        'cc'    => '02_CREDITO.pdf',
-        'other' => '03_TRANSFERENCIA.pdf',
+        'debit_card' => '01_DEBITO.pdf',
+        'CC'         => '02_CREDITO.pdf',
+        'other'      => '03_TRANSFERENCIA.pdf',
     ];
 
     public function __construct()
@@ -670,6 +670,105 @@ class Sales extends MY_Controller
         $this->generar_zip_ventas_facturadas($year, $month, $selectedDays);
     }
 
+    public function generar_ventas_facturadas_efectivo_dia()
+    {
+        $this->sma->checkPermissions('pdf');
+        $year  = (int) $this->input->post('cash_year');
+        $month = (int) $this->input->post('cash_month');
+        $day   = (int) $this->input->post('cash_day');
+
+        if (
+            $year < 2000 || $year > 2100
+            || $month < 1 || $month > 12
+            || $day < 1 || $day > 31
+            || !checkdate($month, $day, $year)
+        ) {
+            $this->session->set_flashdata('error', 'Fecha inválida.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $dayDate = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $periodStart = $dayDate . ' 00:00:00';
+        $periodEnd   = $dayDate . ' 23:59:59';
+        $saleIds = $this->get_facturadas_cash_sale_ids($periodStart, $periodEnd);
+
+        if (empty($saleIds)) {
+            $this->session->set_flashdata('warning', 'No se encontraron ventas de efectivo para el día seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $allPages = [];
+        $skippedSales = [];
+        foreach ($saleIds as $saleId) {
+            try {
+                $allPages[] = $this->build_sale_pdf_page((int) $saleId);
+            } catch (Throwable $saleBuildError) {
+                $this->register_facturadas_skip($skippedSales, (int) $saleId, 'cash', $dayDate, $saleBuildError, 'build');
+            }
+        }
+
+        if (empty($allPages)) {
+            $this->session->set_flashdata('warning', 'No se pudo generar un PDF válido de efectivo para el día seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $tmpDir = sys_get_temp_dir();
+        $tmpPdfPath = $tmpDir . '/ventas_efectivo_' . $dayDate . '_' . uniqid() . '.pdf';
+        $validPages = $allPages;
+
+        try {
+            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+        } catch (Throwable $batchRenderError) {
+            log_message('error', 'Ventas efectivo PDF diario: fallo render por lote, se intenta por venta. day=' . $dayDate . ' error=' . $this->build_facturadas_error_snippet($batchRenderError));
+            if (is_file($tmpPdfPath)) {
+                @unlink($tmpPdfPath);
+            }
+
+            $validPages = [];
+            foreach ($allPages as $index => $page) {
+                $probePdfPath = $tmpDir . '/ventas_efectivo_probe_' . uniqid() . '.pdf';
+                try {
+                    $this->sma->generate_pdf([$page], $probePdfPath, 'F');
+                    if (!is_file($probePdfPath) || @filesize($probePdfPath) === 0) {
+                        throw new RuntimeException('PDF temporal vacío al validar venta de efectivo.');
+                    }
+                    $validPages[] = $page;
+                } catch (Throwable $saleRenderError) {
+                    log_message('error', 'Ventas efectivo PDF diario: venta omitida durante validación individual. day=' . $dayDate . ' index=' . $index . ' error=' . $this->build_facturadas_error_snippet($saleRenderError));
+                } finally {
+                    if (is_file($probePdfPath)) {
+                        @unlink($probePdfPath);
+                    }
+                }
+            }
+
+            if (empty($validPages)) {
+                $this->session->set_flashdata('warning', 'No se pudo generar un PDF válido de efectivo para el día seleccionado.');
+                admin_redirect('sales/ventas_facturadas_pdf');
+            }
+
+            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+        }
+
+        if (!is_file($tmpPdfPath) || @filesize($tmpPdfPath) === 0) {
+            $this->session->set_flashdata('warning', 'No se pudo generar un PDF válido de efectivo para el día seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $this->load->helper('download');
+        $pdfName = $dayDate . '__EFECTIVO.pdf';
+        $pdfData = file_get_contents($tmpPdfPath);
+        @unlink($tmpPdfPath);
+
+        if (count($skippedSales) > 0) {
+            $this->session->set_flashdata('warning', 'Éxito parcial: ' . count($skippedSales) . ' ventas de efectivo omitidas por error de render PDF.');
+        } else {
+            $this->session->set_flashdata('message', 'PDF de efectivo generado correctamente.');
+        }
+
+        force_download($pdfName, $pdfData);
+    }
+
     private function generar_zip_ventas_facturadas($year, $month, $days = null)
     {
         $periodStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
@@ -1078,98 +1177,12 @@ class Sales extends MY_Controller
 
     private function resolve_facturadas_payment_order($periodStart, $periodEnd)
     {
-        $paymentOrder = $this->facturadas_payment_files;
-        $cashMethod   = null;
-
-        $rows = $this->db
-            ->select('DISTINCT(p.paid_by) as paid_by', false)
-            ->from('sales s')
-            ->join('payments p', 'p.sale_id = s.id', 'inner')
-            ->where('s.pos', 1)
-            ->where('s.date >=', $periodStart)
-            ->where('s.date <=', $periodEnd)
-            ->where('s.factura_id IS NOT NULL', null, false)
-            ->where("TRIM(s.factura_id) !=", '')
-            ->get()
-            ->result();
-
-        foreach ($rows as $row) {
-            $paidBy = trim((string) $row->paid_by);
-            if ($paidBy === '') {
-                continue;
-            }
-            $normalized = strtolower($paidBy);
-            if ($normalized === 'efectivo' || $normalized === 'cash') {
-                $cashMethod = $paidBy;
-                break;
-            }
-        }
-
-        if ($cashMethod) {
-            $paymentOrder[$cashMethod] = '04_EFECTIVO.pdf';
-        } else {
-            $paymentOrder['cash'] = '04_EFECTIVO.pdf';
-        }
-
-        return $paymentOrder;
+        return $this->facturadas_payment_files;
     }
 
     private function resolve_facturadas_daily_payment_order($periodStart, $periodEnd)
     {
-        $rows = $this->db
-            ->select('DISTINCT(p.paid_by) as paid_by', false)
-            ->from('sales s')
-            ->join('payments p', 'p.sale_id = s.id', 'inner')
-            ->where('s.pos', 1)
-            ->where('s.date >=', $periodStart)
-            ->where('s.date <=', $periodEnd)
-            ->where('s.factura_id IS NOT NULL', null, false)
-            ->where("TRIM(s.factura_id) !=", '')
-            ->order_by('p.paid_by', 'asc')
-            ->get()
-            ->result();
-
-        $groupedMethods = [
-            'DEBITO'        => [],
-            'CREDITO'       => [],
-            'TRANSFERENCIA' => [],
-            'EFECTIVO'      => [],
-        ];
-
-        foreach ($rows as $row) {
-            $paidBy = trim((string) $row->paid_by);
-            if ($paidBy === '') {
-                continue;
-            }
-
-            $groupedMethods[$this->classify_facturadas_daily_payment_group($paidBy)][] = $paidBy;
-        }
-
-        $visualOrder = ['DEBITO', 'CREDITO', 'TRANSFERENCIA', 'EFECTIVO'];
-        $paymentOrder = [];
-        $paymentFilesByGroup = [
-            'DEBITO'        => '01_DEBITO.pdf',
-            'CREDITO'       => '02_CREDITO.pdf',
-            'TRANSFERENCIA' => '03_TRANSFERENCIA.pdf',
-            'EFECTIVO'      => '04_EFECTIVO.pdf',
-        ];
-
-        foreach ($visualOrder as $group) {
-            $methods = array_values(array_unique($groupedMethods[$group]));
-            sort($methods, SORT_NATURAL | SORT_FLAG_CASE);
-
-            foreach ($methods as $paidBy) {
-                $paymentOrder[$paidBy] = $paymentFilesByGroup[$group];
-            }
-        }
-
-        $debugParts = [];
-        foreach ($visualOrder as $group) {
-            $debugParts[] = $group . '=' . implode(',', $groupedMethods[$group]);
-        }
-        log_message('debug', 'Ventas facturadas PDF diario: paid_by detectados y clasificados [' . implode(' | ', $debugParts) . ']');
-
-        return $paymentOrder;
+        return $this->facturadas_payment_files;
     }
 
     private function classify_facturadas_daily_payment_group($paidBy)
@@ -1189,6 +1202,31 @@ class Sales extends MY_Controller
         }
 
         return 'TRANSFERENCIA';
+    }
+
+    private function get_facturadas_cash_sale_ids($periodStart, $periodEnd)
+    {
+        $rows = $this->db
+            ->select('DISTINCT(s.id) as sale_id', false)
+            ->from('sales s')
+            ->join('payments p', 'p.sale_id = s.id', 'inner')
+            ->where('s.pos', 1)
+            ->where('s.date >=', $periodStart)
+            ->where('s.date <=', $periodEnd)
+            ->where('p.paid_by', 'cash')
+            ->where('s.factura_id IS NOT NULL', null, false)
+            ->where("TRIM(s.factura_id) !=", '')
+            ->order_by('s.date', 'asc')
+            ->order_by('s.id', 'asc')
+            ->get()
+            ->result();
+
+        $saleIds = [];
+        foreach ($rows as $row) {
+            $saleIds[] = (int) $row->sale_id;
+        }
+
+        return $saleIds;
     }
 
     private function build_facturadas_warehouse_order_map()
