@@ -232,9 +232,9 @@
                                 <td style="text-align:center; width:40px; vertical-align:middle;"><?= $r; ?></td>
                                 <td style="vertical-align:middle;">
                                     <?= $row->product_code . ' - ' . $row->product_name . ($row->variant ? ' (' . $row->variant . ')' : ''); ?>
-                                    <?= $row->second_name ? '<br>' . $row->second_name : ''; ?>
-                                    <?= $row->details ? '<br>' . $row->details : ''; ?>
-                                    <?= $row->serial_no ? '<br>' . $row->serial_no : ''; ?>
+                                    <?= $row->second_name ? '<br>' . html_escape($row->second_name) : ''; ?>
+                                    <?= $row->details ? '<br>' . nl2br(html_escape($row->details)) : ''; ?>
+                                    <?= $row->serial_no ? '<br>' . html_escape($row->serial_no) : ''; ?>
                                 </td>
                                 <?php if ($Settings->indian_gst) {
                                     ?>
@@ -267,9 +267,9 @@
                                     <td style="text-align:center; width:40px; vertical-align:middle;"><?= $r; ?></td>
                                     <td style="vertical-align:middle;">
                                     <?= $row->product_code . ' - ' . $row->product_name . ($row->variant ? ' (' . $row->variant . ')' : ''); ?>
-                                    <?= $row->second_name ? '<br>' . $row->second_name : ''; ?>
-                                    <?= $row->details ? '<br>' . $row->details : ''; ?>
-                                    <?= $row->serial_no ? '<br>' . $row->serial_no : ''; ?>
+                                    <?= $row->second_name ? '<br>' . html_escape($row->second_name) : ''; ?>
+                                    <?= $row->details ? '<br>' . nl2br(html_escape($row->details)) : ''; ?>
+                                    <?= $row->serial_no ? '<br>' . html_escape($row->serial_no) : ''; ?>
                                     </td>
                                 <?php if ($Settings->indian_gst) {
                                     ?>

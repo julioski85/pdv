@@ -46,6 +46,11 @@ class Tec_dompdf extends DOMPDF
             $html   = substr_replace($html, $utf8ar, $p[$i - 1], $p[$i] - $p[$i - 1]);
         }
 
+        $html = $this->sanitize_html_for_dompdf($html);
+        if (trim($html) === '') {
+            throw new RuntimeException('No hay contenido HTML válido para renderizar PDF.');
+        }
+
         // $this->set_option('debugPng', true);
         // $this->set_option('debugLayout', true);
         $this->set_option('isPhpEnabled', true);
@@ -68,5 +73,39 @@ class Tec_dompdf extends DOMPDF
         }
         $this->stream($name);
         return true;
+    }
+
+    private function sanitize_html_for_dompdf($html)
+    {
+        $html = (string) $html;
+
+        if (function_exists('mb_convert_encoding')) {
+            $html = mb_convert_encoding($html, 'UTF-8', 'UTF-8');
+        }
+
+        $html = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $html);
+
+        if (stripos($html, '<html') === false) {
+            $html = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>' . $html . '</body></html>';
+        } elseif (stripos($html, '<meta charset=') === false) {
+            $html = preg_replace('/<head([^>]*)>/i', '<head$1><meta charset="UTF-8">', $html, 1);
+        }
+
+        if (!class_exists('DOMDocument')) {
+            return $html;
+        }
+
+        $previousUseErrors = libxml_use_internal_errors(true);
+        $dom = new DOMDocument('1.0', 'UTF-8');
+        $loaded = $dom->loadHTML($html, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previousUseErrors);
+
+        if (!$loaded) {
+            return $html;
+        }
+
+        $normalized = $dom->saveHTML();
+        return $normalized !== false ? $normalized : $html;
     }
 }

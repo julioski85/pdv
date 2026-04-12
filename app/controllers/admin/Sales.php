@@ -656,10 +656,12 @@ class Sales extends MY_Controller
         $salesBuckets = $this->get_facturadas_sales_buckets($periodStart, $periodEnd, array_keys($paymentOrder), $warehouses);
 
         $zipPath       = $tmpDir . '/ventas_facturadas_' . $periodLabel . '_' . uniqid() . '.zip';
-        $tempPdfFiles  = [];
-        $generated     = 0;
-        $errorMessage  = null;
-        $zip           = new ZipArchive();
+        $tempPdfFiles        = [];
+        $generated           = 0;
+        $errorMessage        = null;
+        $zip                 = new ZipArchive();
+        $skippedSales        = [];
+        $totalSalesProcessed = 0;
 
         try {
             if (true !== $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
@@ -679,12 +681,67 @@ class Sales extends MY_Controller
 
                         $pages = [];
                         foreach ($saleIds as $saleId) {
-                            $pages[] = $this->build_sale_pdf_page($saleId);
+                            $totalSalesProcessed++;
+                            try {
+                                $pages[$saleId] = $this->build_sale_pdf_page($saleId);
+                            } catch (Throwable $saleBuildError) {
+                                $this->register_facturadas_skip($skippedSales, (int) $saleId, (string) $paymentMethod, (string) $dayDate, $saleBuildError, 'build');
+                            }
+                        }
+
+                        if (empty($pages)) {
+                            continue;
                         }
 
                         $tmpPdfPath = $tmpDir . '/ventas_facturadas_' . uniqid() . '.pdf';
-                        $this->sma->generate_pdf($pages, $tmpPdfPath, 'F');
-                        if (!is_file($tmpPdfPath)) {
+                        try {
+                            $this->sma->generate_pdf(array_values($pages), $tmpPdfPath, 'F');
+                        } catch (Throwable $batchRenderError) {
+                            log_message(
+                                'error',
+                                'Ventas facturadas PDF: fallo render por lote, se intenta por venta. day=' . $dayDate . ' paid_by=' . $paymentMethod . ' warehouse_id=' . $warehouse->id . ' error=' . $this->build_facturadas_error_snippet($batchRenderError)
+                            );
+                            if (is_file($tmpPdfPath)) {
+                                @unlink($tmpPdfPath);
+                            }
+
+                            $validPages = [];
+                            foreach ($pages as $saleId => $page) {
+                                $probePdfPath = $tmpDir . '/ventas_facturadas_probe_' . uniqid() . '.pdf';
+                                try {
+                                    $this->sma->generate_pdf([$page], $probePdfPath, 'F');
+                                    if (!is_file($probePdfPath) || @filesize($probePdfPath) === 0) {
+                                        throw new RuntimeException('PDF temporal vacío al validar venta.');
+                                    }
+                                    $validPages[] = $page;
+                                } catch (Throwable $saleRenderError) {
+                                    $this->register_facturadas_skip($skippedSales, (int) $saleId, (string) $paymentMethod, (string) $dayDate, $saleRenderError, 'render');
+                                } finally {
+                                    if (is_file($probePdfPath)) {
+                                        @unlink($probePdfPath);
+                                    }
+                                }
+                            }
+
+                            if (empty($validPages)) {
+                                continue;
+                            }
+
+                            try {
+                                $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+                            } catch (Throwable $rebuildError) {
+                                log_message(
+                                    'error',
+                                    'Ventas facturadas PDF: fallo al reconstruir lote saneado. day=' . $dayDate . ' paid_by=' . $paymentMethod . ' warehouse_id=' . $warehouse->id . ' error=' . $this->build_facturadas_error_snippet($rebuildError)
+                                );
+                                if (is_file($tmpPdfPath)) {
+                                    @unlink($tmpPdfPath);
+                                }
+                                continue;
+                            }
+                        }
+
+                        if (!is_file($tmpPdfPath) || @filesize($tmpPdfPath) === 0) {
                             continue;
                         }
 
@@ -716,8 +773,20 @@ class Sales extends MY_Controller
 
         if ($generated === 0) {
             @unlink($zipPath);
+            $skippedCount = count($skippedSales);
+            if ($totalSalesProcessed > 0 && $skippedCount > 0) {
+                $this->session->set_flashdata('warning', 'No se pudo generar ningún PDF válido. Ventas omitidas por error de render PDF: ' . $skippedCount . '.');
+                admin_redirect('sales/ventas_facturadas_pdf');
+            }
             $this->session->set_flashdata('warning', 'No se encontraron ventas facturadas para el periodo seleccionado.');
             admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $skippedCount = count($skippedSales);
+        if ($skippedCount > 0) {
+            $this->session->set_flashdata('warning', 'Éxito parcial: ' . $skippedCount . ' ventas omitidas por error de render PDF.');
+        } else {
+            $this->session->set_flashdata('message', 'ZIP de ventas facturadas generado correctamente.');
         }
 
         $this->load->helper('download');
@@ -731,6 +800,9 @@ class Sales extends MY_Controller
     {
         $this->data['error'] = validation_errors() ? validation_errors() : $this->session->flashdata('error');
         $inv                 = $this->sales_model->getInvoiceByID($id);
+        if (!$inv) {
+            throw new RuntimeException('Venta no encontrada para generar PDF.');
+        }
         if (!$this->session->userdata('view_right')) {
             $this->sma->view_rights($inv->created_by);
         }
@@ -753,6 +825,29 @@ class Sales extends MY_Controller
             'content' => $html_data,
             'footer'  => $this->data['biller']->invoice_footer,
         ];
+    }
+
+    private function register_facturadas_skip(array &$skippedSales, $saleId, $paymentMethod, $dayDate, Throwable $error, $stage)
+    {
+        $skippedSales[$saleId] = true;
+        log_message(
+            'error',
+            'Ventas facturadas PDF omitida: sale_id=' . $saleId
+            . ' paid_by=' . $paymentMethod
+            . ' day=' . $dayDate
+            . ' stage=' . $stage
+            . ' error=' . $this->build_facturadas_error_snippet($error)
+        );
+    }
+
+    private function build_facturadas_error_snippet(Throwable $error)
+    {
+        $message = preg_replace('/\s+/', ' ', trim((string) $error->getMessage()));
+        if ($message === '') {
+            return 'sin mensaje';
+        }
+
+        return substr($message, 0, 220);
     }
 
     private function resolve_facturadas_warehouses()
