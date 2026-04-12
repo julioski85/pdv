@@ -75,6 +75,11 @@ class Tec_mpdf
             }
         }
 
+        if ($output_type == 'F') {
+            $mpdf->Output($name, 'F');
+            return $name;
+        }
+
         if ($output_type == 'S') {
             $file_content = $mpdf->Output('', 'S');
             write_file('assets/uploads/' . $name, $file_content);

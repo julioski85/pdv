@@ -636,45 +636,84 @@ class Sales extends MY_Controller
         $periodLabel = sprintf('%04d-%02d', $year, $month);
         $daysInMonth = (int) date('t', strtotime($periodStart));
 
-        $paymentOrder = $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
-        $warehouses   = $this->resolve_facturadas_warehouses();
-
-        $zipPath = sys_get_temp_dir() . '/ventas_facturadas_' . $periodLabel . '_' . uniqid() . '.zip';
-        $zip     = new ZipArchive();
-        if (true !== $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
-            $this->session->set_flashdata('error', 'No fue posible crear el ZIP.');
+        if (!class_exists('ZipArchive')) {
+            $this->session->set_flashdata('error', 'ZipArchive no está disponible en el servidor. Contacte a soporte de hosting.');
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 
-        $generated = 0;
-        for ($day = 1; $day <= $daysInMonth; $day++) {
-            $dayLabel = sprintf('%02d', $day);
-            $dayDate  = sprintf('%04d-%02d-%02d', $year, $month, $day);
+        $tmpDir = sys_get_temp_dir();
+        if (!is_dir($tmpDir) || !is_writable($tmpDir)) {
+            $this->session->set_flashdata('error', 'La carpeta temporal del servidor no es escribible.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
 
-            foreach ($warehouses as $warehouse) {
-                foreach ($paymentOrder as $paymentMethod => $fileName) {
-                    $saleIds = $this->get_facturadas_sale_ids($dayDate, $warehouse->id, $paymentMethod);
-                    if (empty($saleIds)) {
-                        continue;
-                    }
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
 
-                    $pages = [];
-                    foreach ($saleIds as $saleId) {
-                        $pages[] = $this->build_sale_pdf_page($saleId);
-                    }
-                    $pdfContent = $this->sma->generate_pdf($pages, $fileName, 'S');
-                    if (!$pdfContent) {
-                        continue;
-                    }
+        $paymentOrder = $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
+        $warehouses   = $this->resolve_facturadas_warehouses();
+        $salesBuckets = $this->get_facturadas_sales_buckets($periodStart, $periodEnd, array_keys($paymentOrder), $warehouses);
 
-                    $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
-                    $zip->addFromString($zipFilePath, $pdfContent);
-                    $generated++;
+        $zipPath       = $tmpDir . '/ventas_facturadas_' . $periodLabel . '_' . uniqid() . '.zip';
+        $tempPdfFiles  = [];
+        $generated     = 0;
+        $errorMessage  = null;
+        $zip           = new ZipArchive();
+
+        try {
+            if (true !== $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {
+                throw new Exception('No fue posible crear el ZIP.');
+            }
+
+            for ($day = 1; $day <= $daysInMonth; $day++) {
+                $dayLabel = sprintf('%02d', $day);
+                $dayDate  = sprintf('%04d-%02d-%02d', $year, $month, $day);
+
+                foreach ($warehouses as $warehouse) {
+                    foreach ($paymentOrder as $paymentMethod => $fileName) {
+                        $saleIds = $salesBuckets[$dayDate][$warehouse->id][$paymentMethod] ?? [];
+                        if (empty($saleIds)) {
+                            continue;
+                        }
+
+                        $pages = [];
+                        foreach ($saleIds as $saleId) {
+                            $pages[] = $this->build_sale_pdf_page($saleId);
+                        }
+
+                        $tmpPdfPath = $tmpDir . '/ventas_facturadas_' . uniqid() . '.pdf';
+                        $this->sma->generate_pdf($pages, $tmpPdfPath, 'F');
+                        if (!is_file($tmpPdfPath)) {
+                            continue;
+                        }
+
+                        $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
+                        $zip->addFile($tmpPdfPath, $zipFilePath);
+                        $tempPdfFiles[] = $tmpPdfPath;
+                        $generated++;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            $errorMessage = 'No fue posible generar el ZIP de ventas facturadas. ' . $e->getMessage();
+        } finally {
+            $zip->close();
+            foreach ($tempPdfFiles as $tmpPdfPath) {
+                if (is_file($tmpPdfPath)) {
+                    @unlink($tmpPdfPath);
                 }
             }
         }
 
-        $zip->close();
+        if ($errorMessage) {
+            if (is_file($zipPath)) {
+                @unlink($zipPath);
+            }
+            $this->session->set_flashdata('error', $errorMessage);
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
         if ($generated === 0) {
             @unlink($zipPath);
             $this->session->set_flashdata('warning', 'No se encontraron ventas facturadas para el periodo seleccionado.');
@@ -774,16 +813,26 @@ class Sales extends MY_Controller
         return $paymentOrder;
     }
 
-    private function get_facturadas_sale_ids($dayDate, $warehouseId, $paymentMethod)
+    private function get_facturadas_sales_buckets($periodStart, $periodEnd, $paymentMethods, $warehouses)
     {
+        if (empty($paymentMethods) || empty($warehouses)) {
+            return [];
+        }
+
+        $warehouseIds = [];
+        foreach ($warehouses as $warehouse) {
+            $warehouseIds[] = (int) $warehouse->id;
+        }
+
         $rows = $this->db
-            ->select('DISTINCT(s.id) as id', false)
+            ->select('DISTINCT(s.id) as sale_id, DATE(s.date) as sale_day, s.warehouse_id, p.paid_by', false)
             ->from('sales s')
             ->join('payments p', 'p.sale_id = s.id', 'inner')
             ->where('s.pos', 1)
-            ->where('s.warehouse_id', $warehouseId)
-            ->where('DATE(s.date)', $dayDate)
-            ->where('p.paid_by', $paymentMethod)
+            ->where('s.date >=', $periodStart)
+            ->where('s.date <=', $periodEnd)
+            ->where_in('s.warehouse_id', $warehouseIds)
+            ->where_in('p.paid_by', $paymentMethods)
             ->where('s.factura_id IS NOT NULL', null, false)
             ->where("TRIM(s.factura_id) !=", '')
             ->order_by('s.date', 'asc')
@@ -791,12 +840,26 @@ class Sales extends MY_Controller
             ->get()
             ->result();
 
-        $ids = [];
+        $buckets = [];
         foreach ($rows as $row) {
-            $ids[] = (int) $row->id;
+            $saleDay     = (string) $row->sale_day;
+            $warehouseId = (int) $row->warehouse_id;
+            $paidBy      = (string) $row->paid_by;
+
+            if (!isset($buckets[$saleDay])) {
+                $buckets[$saleDay] = [];
+            }
+            if (!isset($buckets[$saleDay][$warehouseId])) {
+                $buckets[$saleDay][$warehouseId] = [];
+            }
+            if (!isset($buckets[$saleDay][$warehouseId][$paidBy])) {
+                $buckets[$saleDay][$warehouseId][$paidBy] = [];
+            }
+
+            $buckets[$saleDay][$warehouseId][$paidBy][] = (int) $row->sale_id;
         }
 
-        return $ids;
+        return $buckets;
     }
 
     /* ------------------------------- */

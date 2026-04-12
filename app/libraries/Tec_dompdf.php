@@ -56,6 +56,11 @@ class Tec_dompdf extends DOMPDF
         $this->getOptions()->setIsFontSubsettingEnabled(true);
         $this->render();
 
+        if ($output_type == 'F') {
+            file_put_contents($name, $this->output());
+            return $name;
+        }
+
         if ($output_type == 'S') {
             $output = $this->output();
             write_file('assets/uploads/' . $name, $output);
