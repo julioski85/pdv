@@ -9,7 +9,7 @@
     <div class="box-content">
         <div class="row">
             <div class="col-lg-12">
-                <p class="introtext">Genera un ZIP por día con PDFs combinados por almacén y método de pago (solo ventas POS con factura).</p>
+                <p class="introtext">Genera un ZIP por día con PDFs combinados por almacén y método de pago (solo ventas POS con factura; métodos: debit_card, CC y other).</p>
 
                 <?php echo admin_form_open('sales/generar_ventas_facturadas_pdf_dia'); ?>
                 <div class="row">
@@ -57,6 +57,54 @@
                         <i class="fa fa-download"></i> Generar ZIP diario
                     </button>
                     <a href="<?= admin_url('sales'); ?>" class="btn btn-default">Volver</a>
+                </div>
+                <?= form_close(); ?>
+
+                <hr>
+                <p class="text-muted">Exportación de efectivo en un solo PDF (paid_by = cash):</p>
+                <?php echo admin_form_open('sales/generar_ventas_facturadas_efectivo_dia'); ?>
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="form-group">
+                            <label for="cash-year">Año</label>
+                            <select name="cash_year" id="cash-year" class="form-control" required>
+                                <?php foreach ($years as $year): ?>
+                                    <option value="<?= $year; ?>"<?= (int) $selected_year === (int) $year ? ' selected' : ''; ?>>
+                                        <?= $year; ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group">
+                            <label for="cash-month">Mes</label>
+                            <select name="cash_month" id="cash-month" class="form-control" required>
+                                <?php for ($m = 1; $m <= 12; $m++): ?>
+                                    <option value="<?= $m; ?>"<?= (int) $selected_month === $m ? ' selected' : ''; ?>>
+                                        <?= sprintf('%02d', $m); ?>
+                                    </option>
+                                <?php endfor; ?>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="form-group">
+                            <label for="cash-day">Día</label>
+                            <select name="cash_day" id="cash-day" class="form-control" required>
+                                <?php for ($d = 1; $d <= 31; $d++): ?>
+                                    <option value="<?= $d; ?>"<?= (int) $selected_day === $d ? ' selected' : ''; ?>>
+                                        <?= sprintf('%02d', $d); ?>
+                                    </option>
+                                <?php endfor; ?>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn btn-success">
+                        <i class="fa fa-money"></i> Descargar efectivo del día
+                    </button>
                 </div>
                 <?= form_close(); ?>
 
