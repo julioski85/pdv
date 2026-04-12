@@ -1269,28 +1269,100 @@ class Sales extends MY_Controller
 
     private function build_facturadas_grouped_pdf_content($groupedPages)
     {
-        $html = '';
+        $assets = [];
+        $sheetsHtml = '';
         $previousGroupKey = null;
+        $currentSheetTiles = [];
+        $currentSheetGroupKey = null;
+        $sheetCount = 0;
+
+        $flushSheet = function () use (&$sheetsHtml, &$currentSheetTiles, &$sheetCount) {
+            if (empty($currentSheetTiles)) {
+                return;
+            }
+
+            $sheetStyles = [];
+            if ($sheetCount > 0) {
+                $sheetStyles[] = 'page-break-before: always';
+            }
+
+            $sheetsHtml .= '<div class="facturadas-sheet"' . (!empty($sheetStyles) ? ' style="' . implode('; ', $sheetStyles) . '"' : '') . '>';
+            foreach ($currentSheetTiles as $tileHtml) {
+                $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-scale">' . $tileHtml . '</div></div>';
+            }
+            $sheetsHtml .= '</div>';
+
+            $currentSheetTiles = [];
+            $sheetCount++;
+        };
 
         foreach ($groupedPages as $entry) {
             if (!isset($entry['page']) || !is_array($entry['page']) || !isset($entry['page']['content'])) {
                 continue;
             }
 
-            $currentGroupKey = (string) ($entry['group_key'] ?? '');
-            if ($html !== '' && $previousGroupKey !== null && $currentGroupKey !== '' && $currentGroupKey !== $previousGroupKey) {
-                $html .= '<div style="page-break-before: always;"></div>';
+            $parts = $this->extract_facturadas_pdf_parts((string) $entry['page']['content']);
+            if ($parts['body'] === '') {
+                continue;
             }
 
-            $html .= (string) $entry['page']['content'];
+            if ($parts['assets'] !== '') {
+                $assets[$parts['assets']] = $parts['assets'];
+            }
+
+            $currentGroupKey = (string) ($entry['group_key'] ?? '');
+            if ($currentSheetGroupKey === null) {
+                $currentSheetGroupKey = $currentGroupKey;
+            }
+
+            if ($previousGroupKey !== null && $currentGroupKey !== $previousGroupKey) {
+                $flushSheet();
+                $currentSheetGroupKey = $currentGroupKey;
+            }
+
+            if (count($currentSheetTiles) >= 4 || $currentGroupKey !== $currentSheetGroupKey) {
+                $flushSheet();
+                $currentSheetGroupKey = $currentGroupKey;
+            }
+
+            $currentSheetTiles[] = $parts['body'];
             $previousGroupKey = $currentGroupKey;
         }
 
-        if (trim($html) === '') {
+        $flushSheet();
+
+        if (trim($sheetsHtml) === '') {
             throw new RuntimeException('No hay contenido HTML válido para renderizar PDF por grupos.');
         }
 
-        return $html;
+        $layoutCss = '<style>'
+            . '@page { margin: 8mm; }'
+            . 'html, body { margin: 0; padding: 0; }'
+            . '.facturadas-sheet { width: 100%; height: 100%; display: table; table-layout: fixed; }'
+            . '.facturadas-tile { width: 50%; height: 50%; display: inline-block; vertical-align: top; box-sizing: border-box; overflow: hidden; padding: 3mm; }'
+            . '.facturadas-tile-scale { width: 208%; transform: scale(0.48); transform-origin: top left; }'
+            . '</style>';
+
+        return '<!DOCTYPE html><html><head><meta charset="utf-8">' . implode('', array_values($assets)) . $layoutCss . '</head><body>' . $sheetsHtml . '</body></html>';
+    }
+
+    private function extract_facturadas_pdf_parts($html)
+    {
+        $normalized = trim((string) $html);
+
+        $assets = '';
+        if (preg_match('/<head[^>]*>(.*?)<\/head>/is', $normalized, $headMatch)) {
+            if (preg_match_all('/<(?:link|style)\b[^>]*>.*?<\/(?:style)>|<(?:link)\b[^>]*\/?\s*>/is', $headMatch[1], $assetMatches)) {
+                $assets = implode('', $assetMatches[0]);
+            }
+        }
+
+        $body = $normalized;
+        if (preg_match('/<body[^>]*>(.*?)<\/body>/is', $normalized, $bodyMatch)) {
+            $body = $bodyMatch[1];
+        }
+
+        return ['assets' => trim($assets), 'body' => trim($body)];
     }
 
     private function build_facturadas_warehouse_order_map()
