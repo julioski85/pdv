@@ -1270,8 +1270,8 @@ class Sales extends MY_Controller
     private function build_facturadas_grouped_pdf_content($groupedPages)
     {
         $assets = [];
-        $sheetsHtml = '';
-        $groupedTiles = [];
+        $pagesHtml = '';
+        $groupedBodies = [];
         $groupOrder = [];
 
         foreach ($groupedPages as $entry) {
@@ -1289,53 +1289,37 @@ class Sales extends MY_Controller
             }
 
             $currentGroupKey = (string) ($entry['group_key'] ?? '');
-            if (!isset($groupedTiles[$currentGroupKey])) {
-                $groupedTiles[$currentGroupKey] = [];
+            if (!isset($groupedBodies[$currentGroupKey])) {
+                $groupedBodies[$currentGroupKey] = [];
                 $groupOrder[] = $currentGroupKey;
             }
-            $groupedTiles[$currentGroupKey][] = $parts['body'];
+            $groupedBodies[$currentGroupKey][] = $parts['body'];
         }
 
-        $sheetCount = 0;
+        $pageCount = 0;
         foreach ($groupOrder as $groupKey) {
-            $tiles = $groupedTiles[$groupKey] ?? [];
-            if (empty($tiles)) {
+            $bodies = $groupedBodies[$groupKey] ?? [];
+            if (empty($bodies)) {
                 continue;
             }
 
-            $chunks = array_chunk($tiles, 4);
-            foreach ($chunks as $chunk) {
-                $sheetStyle = $sheetCount > 0 ? ' style="page-break-before: always;"' : '';
-                $sheetsHtml .= '<div class="facturadas-sheet"' . $sheetStyle . '>';
-
-                for ($tileIndex = 0; $tileIndex < 4; $tileIndex++) {
-                    if (isset($chunk[$tileIndex])) {
-                        $sheetsHtml .= '<div class="facturadas-tile"><div class="facturadas-tile-content"><div class="facturadas-tile-scale">' . $chunk[$tileIndex] . '</div></div></div>';
-                    } else {
-                        $sheetsHtml .= '<div class="facturadas-tile facturadas-tile-empty"><div class="facturadas-tile-content"></div></div>';
-                    }
-                }
-
-                $sheetsHtml .= '</div>';
-                $sheetCount++;
+            foreach ($bodies as $bodyHtml) {
+                $pageStyle = $pageCount > 0 ? ' style="page-break-before: always;"' : '';
+                $pagesHtml .= '<div class="facturadas-page"' . $pageStyle . '>' . $bodyHtml . '</div>';
+                $pageCount++;
             }
         }
 
-        if (trim($sheetsHtml) === '') {
+        if (trim($pagesHtml) === '') {
             throw new RuntimeException('No hay contenido HTML válido para renderizar PDF por grupos.');
         }
 
         $layoutCss = '<style>'
-            . '@page { size: A4 portrait; margin: 8mm; }'
             . 'html, body { margin: 0; padding: 0; }'
-            . '.facturadas-sheet { width: 194mm; height: 281mm; display: flex; flex-wrap: wrap; align-content: stretch; box-sizing: border-box; page-break-inside: avoid; }'
-            . '.facturadas-tile { width: 50%; height: 50%; box-sizing: border-box; overflow: hidden; padding: 3mm; }'
-            . '.facturadas-tile-content { width: 100%; height: 100%; overflow: hidden; }'
-            . '.facturadas-tile-scale { width: 208%; transform: scale(0.48); transform-origin: top left; }'
-            . '.facturadas-tile-empty .facturadas-tile-scale { display: none; }'
+            . '.facturadas-page { page-break-inside: avoid; }'
             . '</style>';
 
-        return '<!DOCTYPE html><html><head><meta charset="utf-8">' . implode('', array_values($assets)) . $layoutCss . '</head><body>' . $sheetsHtml . '</body></html>';
+        return '<!DOCTYPE html><html><head><meta charset="utf-8">' . implode('', array_values($assets)) . $layoutCss . '</head><body>' . $pagesHtml . '</body></html>';
     }
 
     private function extract_facturadas_pdf_parts($html)
