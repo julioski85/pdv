@@ -731,12 +731,15 @@ class Sales extends MY_Controller
             @set_time_limit(0);
         }
 
-        $paymentOrder = $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
+        $isSingleDailyExport = $days !== null && count($daysToProcess) === 1;
+        $paymentOrder = $isSingleDailyExport
+            ? $this->resolve_facturadas_daily_payment_order($periodStart, $periodEnd)
+            : $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
         $warehouses   = $this->resolve_facturadas_warehouses($periodStart, $periodEnd);
         $salesBuckets = $this->get_facturadas_sales_buckets($periodStart, $periodEnd, array_keys($paymentOrder), $warehouses);
         $this->log_facturadas_bucket_summary($salesBuckets);
 
-        if ($days !== null && count($daysToProcess) === 1) {
+        if ($isSingleDailyExport) {
             return $this->generar_pdf_facturadas_diario($periodLabel, $periodStart, $warehouses, $paymentOrder, $salesBuckets);
         }
 
@@ -1109,6 +1112,83 @@ class Sales extends MY_Controller
         }
 
         return $paymentOrder;
+    }
+
+    private function resolve_facturadas_daily_payment_order($periodStart, $periodEnd)
+    {
+        $rows = $this->db
+            ->select('DISTINCT(p.paid_by) as paid_by', false)
+            ->from('sales s')
+            ->join('payments p', 'p.sale_id = s.id', 'inner')
+            ->where('s.pos', 1)
+            ->where('s.date >=', $periodStart)
+            ->where('s.date <=', $periodEnd)
+            ->where('s.factura_id IS NOT NULL', null, false)
+            ->where("TRIM(s.factura_id) !=", '')
+            ->order_by('p.paid_by', 'asc')
+            ->get()
+            ->result();
+
+        $groupedMethods = [
+            'DEBITO'        => [],
+            'CREDITO'       => [],
+            'TRANSFERENCIA' => [],
+            'EFECTIVO'      => [],
+        ];
+
+        foreach ($rows as $row) {
+            $paidBy = trim((string) $row->paid_by);
+            if ($paidBy === '') {
+                continue;
+            }
+
+            $groupedMethods[$this->classify_facturadas_daily_payment_group($paidBy)][] = $paidBy;
+        }
+
+        $visualOrder = ['DEBITO', 'CREDITO', 'TRANSFERENCIA', 'EFECTIVO'];
+        $paymentOrder = [];
+        $paymentFilesByGroup = [
+            'DEBITO'        => '01_DEBITO.pdf',
+            'CREDITO'       => '02_CREDITO.pdf',
+            'TRANSFERENCIA' => '03_TRANSFERENCIA.pdf',
+            'EFECTIVO'      => '04_EFECTIVO.pdf',
+        ];
+
+        foreach ($visualOrder as $group) {
+            $methods = array_values(array_unique($groupedMethods[$group]));
+            sort($methods, SORT_NATURAL | SORT_FLAG_CASE);
+
+            foreach ($methods as $paidBy) {
+                $paymentOrder[$paidBy] = $paymentFilesByGroup[$group];
+            }
+        }
+
+        $debugParts = [];
+        foreach ($visualOrder as $group) {
+            $debugParts[] = $group . '=' . implode(',', $groupedMethods[$group]);
+        }
+        log_message('debug', 'Ventas facturadas PDF diario: paid_by detectados y clasificados [' . implode(' | ', $debugParts) . ']');
+
+        return $paymentOrder;
+    }
+
+    private function classify_facturadas_daily_payment_group($paidBy)
+    {
+        $normalized = strtolower(trim((string) $paidBy));
+
+        if ($normalized === '' || $normalized === 'cash' || $normalized === 'efectivo' || strpos($normalized, 'cash') !== false || strpos($normalized, 'efectivo') !== false) {
+            return 'EFECTIVO';
+        }
+
+        if ($normalized === 'debit' || strpos($normalized, 'debit') !== false || strpos($normalized, 'debito') !== false || strpos($normalized, 'débito') !== false) {
+            return 'DEBITO';
+        }
+
+        if ($normalized === 'cc' || $normalized === 'credit' || strpos($normalized, 'credit') !== false || strpos($normalized, 'credito') !== false || strpos($normalized, 'crédito') !== false) {
+            return 'CREDITO';
+        }
+
+        return 'TRANSFERENCIA';
     }
 
     private function build_facturadas_warehouse_order_map()
