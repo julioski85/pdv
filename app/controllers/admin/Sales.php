@@ -5,14 +5,14 @@ defined('BASEPATH') or exit('No direct script access allowed');
 class Sales extends MY_Controller
 {
     private $facturadas_warehouse_order = [
-        ['code' => 'TLA', 'label' => '01_TLALPAN'],
-        ['code' => 'BAL', 'label' => '02_BALBUENA'],
-        ['code' => 'INS', 'label' => '03_INSURGENTES'],
-        ['code' => 'AJU', 'label' => '04_PICACHO_AJUSCO'],
-        ['code' => 'SJM', 'label' => '05_SAN_JERONIMO'],
-        ['code' => 'PC', 'label' => '06_PIE_DE_LA_CUESTA'],
-        ['code' => 'TQ', 'label' => '07_TAQ'],
-        ['code' => 'COAP', 'label' => '08_COAPA'],
+        ['code' => 'TLA',  'name' => 'TLALPAN',           'label' => '01_TLALPAN'],
+        ['code' => 'BAL',  'name' => 'BALBUENA',          'label' => '02_BALBUENA'],
+        ['code' => 'INS',  'name' => 'INSURGENTES',       'label' => '03_INSURGENTES'],
+        ['code' => 'AJU',  'name' => 'PICACHO AJUSCO',    'label' => '04_PICACHO_AJUSCO'],
+        ['code' => 'SJM',  'name' => 'SAN JERONIMO',      'label' => '05_SAN_JERONIMO'],
+        ['code' => 'PC',   'name' => 'PIE DE LA CUESTA',  'label' => '06_PIE_DE_LA_CUESTA'],
+        ['code' => 'TQ',   'name' => 'TAQ',               'label' => '07_TAQ'],
+        ['code' => 'COAP', 'name' => 'COAPA',             'label' => '08_COAPA'],
     ];
 
     private $facturadas_payment_files = [
@@ -686,8 +686,13 @@ class Sales extends MY_Controller
         }
 
         $paymentOrder = $this->resolve_facturadas_payment_order($periodStart, $periodEnd);
-        $warehouses   = $this->resolve_facturadas_warehouses();
+        $warehouses   = $this->resolve_facturadas_warehouses($periodStart, $periodEnd);
         $salesBuckets = $this->get_facturadas_sales_buckets($periodStart, $periodEnd, array_keys($paymentOrder), $warehouses);
+        $this->log_facturadas_bucket_summary($salesBuckets);
+
+        if ($day !== null) {
+            return $this->generar_pdf_facturadas_diario($periodLabel, $periodStart, $warehouses, $paymentOrder, $salesBuckets);
+        }
 
         $zipPath       = $tmpDir . '/ventas_facturadas_' . $periodLabel . '_' . uniqid() . '.zip';
         $tempPdfFiles        = [];
@@ -831,6 +836,90 @@ class Sales extends MY_Controller
         force_download($zipName, $zipData);
     }
 
+    private function generar_pdf_facturadas_diario($periodLabel, $periodStart, $warehouses, $paymentOrder, $salesBuckets)
+    {
+        $dayDate = substr($periodStart, 0, 10);
+        $allPages = [];
+        $skippedSales = [];
+
+        log_message('debug', 'Ventas facturadas PDF diario: inicio day=' . $dayDate . ' warehouses=' . count($warehouses) . ' payment_methods=' . implode(',', array_keys($paymentOrder)));
+
+        foreach ($warehouses as $warehouse) {
+            foreach ($paymentOrder as $paymentMethod => $fileName) {
+                $saleIds = $salesBuckets[$dayDate][$warehouse->id][$paymentMethod] ?? [];
+                log_message('debug', 'Ventas facturadas PDF diario: procesando warehouse_id=' . (int) $warehouse->id . ' warehouse_code=' . (string) $warehouse->code . ' warehouse_name=' . (string) $warehouse->name . ' paid_by=' . (string) $paymentMethod . ' sales=' . count($saleIds));
+                foreach ($saleIds as $saleId) {
+                    try {
+                        $allPages[] = $this->build_sale_pdf_page($saleId);
+                    } catch (Throwable $saleBuildError) {
+                        $this->register_facturadas_skip($skippedSales, (int) $saleId, (string) $paymentMethod, (string) $dayDate, $saleBuildError, 'build');
+                    }
+                }
+            }
+        }
+
+        if (empty($allPages)) {
+            $this->session->set_flashdata('warning', 'No se encontraron ventas facturadas para el día seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $tmpDir = sys_get_temp_dir();
+        $tmpPdfPath = $tmpDir . '/ventas_facturadas_diario_' . $periodLabel . '_' . uniqid() . '.pdf';
+        $validPages = $allPages;
+
+        try {
+            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+        } catch (Throwable $batchRenderError) {
+            log_message('error', 'Ventas facturadas PDF diario: fallo render por lote, se intenta por venta. day=' . $dayDate . ' error=' . $this->build_facturadas_error_snippet($batchRenderError));
+            if (is_file($tmpPdfPath)) {
+                @unlink($tmpPdfPath);
+            }
+
+            $validPages = [];
+            foreach ($allPages as $index => $page) {
+                $probePdfPath = $tmpDir . '/ventas_facturadas_diario_probe_' . uniqid() . '.pdf';
+                try {
+                    $this->sma->generate_pdf([$page], $probePdfPath, 'F');
+                    if (!is_file($probePdfPath) || @filesize($probePdfPath) === 0) {
+                        throw new RuntimeException('PDF temporal vacío al validar venta.');
+                    }
+                    $validPages[] = $page;
+                } catch (Throwable $saleRenderError) {
+                    log_message('error', 'Ventas facturadas PDF diario: venta omitida durante validación individual. day=' . $dayDate . ' index=' . $index . ' error=' . $this->build_facturadas_error_snippet($saleRenderError));
+                } finally {
+                    if (is_file($probePdfPath)) {
+                        @unlink($probePdfPath);
+                    }
+                }
+            }
+
+            if (empty($validPages)) {
+                $this->session->set_flashdata('warning', 'No se pudo generar un PDF válido para el día seleccionado.');
+                admin_redirect('sales/ventas_facturadas_pdf');
+            }
+
+            $this->sma->generate_pdf($validPages, $tmpPdfPath, 'F');
+        }
+
+        if (!is_file($tmpPdfPath) || @filesize($tmpPdfPath) === 0) {
+            $this->session->set_flashdata('warning', 'No se pudo generar un PDF válido para el día seleccionado.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $this->load->helper('download');
+        $pdfName = 'ventas_facturadas_' . $periodLabel . '.pdf';
+        $pdfData = file_get_contents($tmpPdfPath);
+        @unlink($tmpPdfPath);
+
+        if (count($skippedSales) > 0) {
+            $this->session->set_flashdata('warning', 'Éxito parcial: ' . count($skippedSales) . ' ventas omitidas por error de render PDF.');
+        } else {
+            $this->session->set_flashdata('message', 'PDF de ventas facturadas generado correctamente.');
+        }
+
+        force_download($pdfName, $pdfData);
+    }
+
     private function build_sale_pdf_page($id)
     {
         $this->data['error'] = validation_errors() ? validation_errors() : $this->session->flashdata('error');
@@ -885,22 +974,55 @@ class Sales extends MY_Controller
         return substr($message, 0, 220);
     }
 
-    private function resolve_facturadas_warehouses()
+    private function resolve_facturadas_warehouses($periodStart, $periodEnd)
     {
-        $warehouseMap = [];
-        foreach ($this->site->getAllWarehouses() as $warehouse) {
-            $warehouseMap[$warehouse->code] = $warehouse;
-        }
+        $orderMap = $this->build_facturadas_warehouse_order_map();
+        $rows = $this->db
+            ->select('DISTINCT(w.id) AS id, w.code, w.name', false)
+            ->from('sales s')
+            ->join('warehouses w', 'w.id = s.warehouse_id', 'inner')
+            ->where('s.pos', 1)
+            ->where('s.date >=', $periodStart)
+            ->where('s.date <=', $periodEnd)
+            ->where('s.factura_id IS NOT NULL', null, false)
+            ->where("TRIM(s.factura_id) !=", '')
+            ->order_by('w.id', 'asc')
+            ->get()
+            ->result();
 
         $result = [];
-        foreach ($this->facturadas_warehouse_order as $item) {
-            if (!isset($warehouseMap[$item['code']])) {
-                continue;
+        foreach ($rows as $warehouse) {
+            $codeKey = $this->normalize_facturadas_warehouse_key((string) $warehouse->code);
+            $nameKey = $this->normalize_facturadas_warehouse_key((string) $warehouse->name);
+            $rank = 999;
+            $folderLabel = $this->build_facturadas_default_folder_label((string) $warehouse->name, (int) $warehouse->id);
+
+            if (isset($orderMap['by_code'][$codeKey])) {
+                $rank = $orderMap['by_code'][$codeKey]['rank'];
+                $folderLabel = $orderMap['by_code'][$codeKey]['label'];
+            } elseif (isset($orderMap['by_name'][$nameKey])) {
+                $rank = $orderMap['by_name'][$nameKey]['rank'];
+                $folderLabel = $orderMap['by_name'][$nameKey]['label'];
             }
-            $warehouse = $warehouseMap[$item['code']];
-            $warehouse->folder_label = $item['label'];
+
+            $warehouse->folder_label = $folderLabel;
+            $warehouse->facturadas_rank = $rank;
             $result[] = $warehouse;
         }
+
+        usort($result, function ($a, $b) {
+            if ((int) $a->facturadas_rank === (int) $b->facturadas_rank) {
+                return strcmp((string) $a->name, (string) $b->name);
+            }
+
+            return ((int) $a->facturadas_rank < (int) $b->facturadas_rank) ? -1 : 1;
+        });
+
+        $warehouseLogs = [];
+        foreach ($result as $warehouse) {
+            $warehouseLogs[] = 'id=' . (int) $warehouse->id . ',code=' . (string) $warehouse->code . ',name=' . (string) $warehouse->name . ',folder=' . (string) $warehouse->folder_label . ',rank=' . (int) $warehouse->facturadas_rank;
+        }
+        log_message('debug', 'Ventas facturadas PDF: almacenes detectados por query=' . count($result) . ' [' . implode(' | ', $warehouseLogs) . ']');
 
         return $result;
     }
@@ -941,6 +1063,36 @@ class Sales extends MY_Controller
         }
 
         return $paymentOrder;
+    }
+
+    private function build_facturadas_warehouse_order_map()
+    {
+        $map = ['by_code' => [], 'by_name' => []];
+        foreach ($this->facturadas_warehouse_order as $rank => $item) {
+            $codeKey = $this->normalize_facturadas_warehouse_key((string) $item['code']);
+            $nameKey = $this->normalize_facturadas_warehouse_key((string) $item['name']);
+            $data = ['rank' => $rank, 'label' => $item['label']];
+            $map['by_code'][$codeKey] = $data;
+            $map['by_name'][$nameKey] = $data;
+        }
+
+        return $map;
+    }
+
+    private function normalize_facturadas_warehouse_key($value)
+    {
+        return preg_replace('/[^a-z0-9]/', '', strtolower(trim((string) $value)));
+    }
+
+    private function build_facturadas_default_folder_label($warehouseName, $warehouseId)
+    {
+        $name = preg_replace('/[^A-Z0-9]+/', '_', strtoupper(trim((string) $warehouseName)));
+        $name = trim($name, '_');
+        if ($name === '') {
+            $name = 'WAREHOUSE_' . (int) $warehouseId;
+        }
+
+        return '99_' . $name;
     }
 
     private function get_facturadas_sales_buckets($periodStart, $periodEnd, $paymentMethods, $warehouses)
@@ -990,6 +1142,21 @@ class Sales extends MY_Controller
         }
 
         return $buckets;
+    }
+
+    private function log_facturadas_bucket_summary($buckets)
+    {
+        foreach ($buckets as $saleDay => $warehouseGroups) {
+            foreach ($warehouseGroups as $warehouseId => $paymentGroups) {
+                $warehouseTotal = 0;
+                foreach ($paymentGroups as $paymentMethod => $saleIds) {
+                    $count = count($saleIds);
+                    $warehouseTotal += $count;
+                    log_message('debug', 'Ventas facturadas PDF: day=' . $saleDay . ' warehouse_id=' . (int) $warehouseId . ' paid_by=' . (string) $paymentMethod . ' sales=' . $count);
+                }
+                log_message('debug', 'Ventas facturadas PDF: day=' . $saleDay . ' warehouse_id=' . (int) $warehouseId . ' total_sales=' . $warehouseTotal);
+            }
+        }
     }
 
     /* ------------------------------- */
