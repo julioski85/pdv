@@ -615,6 +615,7 @@ class Sales extends MY_Controller
         $this->data['years'] = range((int) date('Y'), (int) date('Y') - 5);
         $this->data['selected_year'] = $this->input->post('year') ? (int) $this->input->post('year') : (int) date('Y');
         $this->data['selected_month'] = $this->input->post('month') ? (int) $this->input->post('month') : (int) date('m');
+        $this->data['selected_day'] = $this->input->post('day') ? (int) $this->input->post('day') : (int) date('d');
 
         $bc   = [['link' => base_url(), 'page' => lang('home')], ['link' => admin_url('sales'), 'page' => lang('sales')], ['link' => '#', 'page' => 'Ventas facturadas PDF']];
         $meta = ['page_title' => 'Ventas facturadas PDF', 'bc' => $bc];
@@ -631,10 +632,43 @@ class Sales extends MY_Controller
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 
+        $this->generar_zip_ventas_facturadas($year, $month);
+    }
+
+    public function generar_ventas_facturadas_pdf_dia()
+    {
+        $this->sma->checkPermissions('pdf');
+        $year  = (int) $this->input->post('year');
+        $month = (int) $this->input->post('month');
+        $day   = (int) $this->input->post('day');
+
+        if ($year < 2000 || $year > 2100 || $month < 1 || $month > 12 || $day < 1 || $day > 31 || !checkdate($month, $day, $year)) {
+            $this->session->set_flashdata('error', 'Fecha inválida.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $this->generar_zip_ventas_facturadas($year, $month, $day);
+    }
+
+    private function generar_zip_ventas_facturadas($year, $month, $day = null)
+    {
         $periodStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
         $periodEnd   = date('Y-m-t 23:59:59', strtotime($periodStart));
         $periodLabel = sprintf('%04d-%02d', $year, $month);
-        $daysInMonth = (int) date('t', strtotime($periodStart));
+        $daysToProcess = [];
+
+        if ($day !== null) {
+            $dayDate     = sprintf('%04d-%02d-%02d', $year, $month, $day);
+            $periodStart = $dayDate . ' 00:00:00';
+            $periodEnd   = $dayDate . ' 23:59:59';
+            $periodLabel = $dayDate;
+            $daysToProcess = [$dayDate];
+        } else {
+            $daysInMonth = (int) date('t', strtotime($periodStart));
+            for ($tmpDay = 1; $tmpDay <= $daysInMonth; $tmpDay++) {
+                $daysToProcess[] = sprintf('%04d-%02d-%02d', $year, $month, $tmpDay);
+            }
+        }
 
         if (!class_exists('ZipArchive')) {
             $this->session->set_flashdata('error', 'ZipArchive no está disponible en el servidor. Contacte a soporte de hosting.');
@@ -668,10 +702,8 @@ class Sales extends MY_Controller
                 throw new Exception('No fue posible crear el ZIP.');
             }
 
-            for ($day = 1; $day <= $daysInMonth; $day++) {
-                $dayLabel = sprintf('%02d', $day);
-                $dayDate  = sprintf('%04d-%02d-%02d', $year, $month, $day);
-
+            foreach ($daysToProcess as $dayDate) {
+                $dayLabel = date('d', strtotime($dayDate));
                 foreach ($warehouses as $warehouse) {
                     foreach ($paymentOrder as $paymentMethod => $fileName) {
                         $saleIds = $salesBuckets[$dayDate][$warehouse->id][$paymentMethod] ?? [];
@@ -745,7 +777,10 @@ class Sales extends MY_Controller
                             continue;
                         }
 
-                        $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
+                        $zipFilePath = $periodLabel . '/' . $warehouse->folder_label . '/' . $fileName;
+                        if ($day === null) {
+                            $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
+                        }
                         $zip->addFile($tmpPdfPath, $zipFilePath);
                         $tempPdfFiles[] = $tmpPdfPath;
                         $generated++;
@@ -778,7 +813,7 @@ class Sales extends MY_Controller
                 $this->session->set_flashdata('warning', 'No se pudo generar ningún PDF válido. Ventas omitidas por error de render PDF: ' . $skippedCount . '.');
                 admin_redirect('sales/ventas_facturadas_pdf');
             }
-            $this->session->set_flashdata('warning', 'No se encontraron ventas facturadas para el periodo seleccionado.');
+            $this->session->set_flashdata('warning', $day === null ? 'No se encontraron ventas facturadas para el periodo seleccionado.' : 'No se encontraron ventas facturadas para el día seleccionado.');
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 
