@@ -616,6 +616,11 @@ class Sales extends MY_Controller
         $this->data['selected_year'] = $this->input->post('year') ? (int) $this->input->post('year') : (int) date('Y');
         $this->data['selected_month'] = $this->input->post('month') ? (int) $this->input->post('month') : (int) date('m');
         $this->data['selected_day'] = $this->input->post('day') ? (int) $this->input->post('day') : (int) date('d');
+        $days = $this->input->post('days');
+        if (!is_array($days) || empty($days)) {
+            $days = [$this->data['selected_day']];
+        }
+        $this->data['selected_days'] = array_values(array_unique(array_map('intval', $days)));
 
         $bc   = [['link' => base_url(), 'page' => lang('home')], ['link' => admin_url('sales'), 'page' => lang('sales')], ['link' => '#', 'page' => 'Ventas facturadas PDF']];
         $meta = ['page_title' => 'Ventas facturadas PDF', 'bc' => $bc];
@@ -640,29 +645,70 @@ class Sales extends MY_Controller
         $this->sma->checkPermissions('pdf');
         $year  = (int) $this->input->post('year');
         $month = (int) $this->input->post('month');
-        $day   = (int) $this->input->post('day');
+        $daysInput = $this->input->post('days');
+        if (!is_array($daysInput) || empty($daysInput)) {
+            $day = (int) $this->input->post('day');
+            $daysInput = [$day];
+        }
 
-        if ($year < 2000 || $year > 2100 || $month < 1 || $month > 12 || $day < 1 || $day > 31 || !checkdate($month, $day, $year)) {
+        $selectedDays = [];
+        foreach ($daysInput as $dayValue) {
+            $day = (int) $dayValue;
+            if ($day < 1 || $day > 31 || !checkdate($month, $day, $year)) {
+                $this->session->set_flashdata('error', 'Fecha inválida.');
+                admin_redirect('sales/ventas_facturadas_pdf');
+            }
+            $selectedDays[] = $day;
+        }
+        $selectedDays = array_values(array_unique($selectedDays));
+
+        if ($year < 2000 || $year > 2100 || $month < 1 || $month > 12 || empty($selectedDays)) {
             $this->session->set_flashdata('error', 'Fecha inválida.');
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 
-        $this->generar_zip_ventas_facturadas($year, $month, $day);
+        $this->generar_zip_ventas_facturadas($year, $month, $selectedDays);
     }
 
-    private function generar_zip_ventas_facturadas($year, $month, $day = null)
+    private function generar_zip_ventas_facturadas($year, $month, $days = null)
     {
         $periodStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
         $periodEnd   = date('Y-m-t 23:59:59', strtotime($periodStart));
         $periodLabel = sprintf('%04d-%02d', $year, $month);
         $daysToProcess = [];
 
-        if ($day !== null) {
-            $dayDate     = sprintf('%04d-%02d-%02d', $year, $month, $day);
-            $periodStart = $dayDate . ' 00:00:00';
-            $periodEnd   = $dayDate . ' 23:59:59';
-            $periodLabel = $dayDate;
-            $daysToProcess = [$dayDate];
+        if ($days !== null) {
+            if (!is_array($days)) {
+                $days = [(int) $days];
+            }
+
+            $normalizedDays = [];
+            foreach ($days as $day) {
+                $normalizedDay = (int) $day;
+                if ($normalizedDay >= 1 && $normalizedDay <= 31 && checkdate($month, $normalizedDay, $year)) {
+                    $normalizedDays[] = $normalizedDay;
+                }
+            }
+            $normalizedDays = array_values(array_unique($normalizedDays));
+
+            if (empty($normalizedDays)) {
+                $this->session->set_flashdata('error', 'Fecha inválida.');
+                admin_redirect('sales/ventas_facturadas_pdf');
+            }
+
+            foreach ($normalizedDays as $normalizedDay) {
+                $daysToProcess[] = sprintf('%04d-%02d-%02d', $year, $month, $normalizedDay);
+            }
+            sort($daysToProcess);
+
+            $firstDayDate = $daysToProcess[0];
+            $periodStart = $firstDayDate . ' 00:00:00';
+            $periodEnd   = end($daysToProcess) . ' 23:59:59';
+            $periodLabel = count($daysToProcess) === 1
+                ? $firstDayDate
+                : sprintf('%04d-%02d_multi_%s', $year, $month, implode('-', array_map(function ($date) {
+                    return substr($date, -2);
+                }, $daysToProcess)));
         } else {
             $daysInMonth = (int) date('t', strtotime($periodStart));
             for ($tmpDay = 1; $tmpDay <= $daysInMonth; $tmpDay++) {
@@ -690,7 +736,7 @@ class Sales extends MY_Controller
         $salesBuckets = $this->get_facturadas_sales_buckets($periodStart, $periodEnd, array_keys($paymentOrder), $warehouses);
         $this->log_facturadas_bucket_summary($salesBuckets);
 
-        if ($day !== null) {
+        if ($days !== null && count($daysToProcess) === 1) {
             return $this->generar_pdf_facturadas_diario($periodLabel, $periodStart, $warehouses, $paymentOrder, $salesBuckets);
         }
 
@@ -783,7 +829,7 @@ class Sales extends MY_Controller
                         }
 
                         $zipFilePath = $periodLabel . '/' . $warehouse->folder_label . '/' . $fileName;
-                        if ($day === null) {
+                        if ($days === null || count($daysToProcess) > 1) {
                             $zipFilePath = $periodLabel . '/' . $dayLabel . '/' . $warehouse->folder_label . '/' . $fileName;
                         }
                         $zip->addFile($tmpPdfPath, $zipFilePath);
@@ -818,7 +864,7 @@ class Sales extends MY_Controller
                 $this->session->set_flashdata('warning', 'No se pudo generar ningún PDF válido. Ventas omitidas por error de render PDF: ' . $skippedCount . '.');
                 admin_redirect('sales/ventas_facturadas_pdf');
             }
-            $this->session->set_flashdata('warning', $day === null ? 'No se encontraron ventas facturadas para el periodo seleccionado.' : 'No se encontraron ventas facturadas para el día seleccionado.');
+            $this->session->set_flashdata('warning', ($days === null || count($daysToProcess) > 1) ? 'No se encontraron ventas facturadas para el periodo seleccionado.' : 'No se encontraron ventas facturadas para el día seleccionado.');
             admin_redirect('sales/ventas_facturadas_pdf');
         }
 

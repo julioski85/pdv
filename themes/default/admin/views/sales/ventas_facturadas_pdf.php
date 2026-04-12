@@ -37,16 +37,17 @@
                             </select>
                         </div>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-4">
                         <div class="form-group">
-                            <label for="day">Día</label>
-                            <select name="day" id="day" class="form-control" required>
+                            <label for="days">Días</label>
+                            <select name="days[]" id="days" class="form-control" multiple size="8" required>
                                 <?php for ($d = 1; $d <= 31; $d++): ?>
-                                    <option value="<?= $d; ?>"<?= (int) $selected_day === $d ? ' selected' : ''; ?>>
+                                    <option value="<?= $d; ?>"<?= in_array($d, $selected_days, true) ? ' selected' : ''; ?>>
                                         <?= sprintf('%02d', $d); ?>
                                     </option>
                                 <?php endfor; ?>
                             </select>
+                            <small class="text-muted">Puedes seleccionar varios días con Ctrl/Cmd + clic.</small>
                         </div>
                     </div>
                 </div>

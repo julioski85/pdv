@@ -66,6 +66,20 @@
                         echo '<br>' . lang('ccf6') . ': ' . $customer->cf6;
                     }
                         echo '</p>';
+                        $paymentMethods = [];
+                    if (!empty($payments)) {
+                        foreach ($payments as $payment) {
+                            $paidBy = trim((string) $payment->paid_by);
+                            if ($paidBy === '') {
+                                continue;
+                            }
+                            $paymentMethods[] = lang($paidBy) !== $paidBy ? lang($paidBy) : ucfirst($paidBy);
+                        }
+                        $paymentMethods = array_values(array_unique($paymentMethods));
+                    }
+                    if (!empty($paymentMethods)) {
+                        echo lang('payment_method') . ': ' . implode(', ', $paymentMethods) . '<br />';
+                    }
                         echo lang('tel') . ': ' . $customer->phone . '<br />' . lang('email') . ': ' . $customer->email;
                     ?>
                 </div>
