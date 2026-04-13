@@ -775,6 +775,59 @@ class Sales extends MY_Controller
         force_download($pdfName, $pdfData);
     }
 
+    public function generar_ventas_facturadas_pdf_referencias()
+    {
+        $this->sma->checkPermissions('pdf');
+        $referencesInput = (string) $this->input->post('sale_references');
+        $references = $this->parse_facturadas_references_input($referencesInput);
+
+        if (empty($references)) {
+            $this->session->set_flashdata('error', 'Ingresa al menos una referencia de venta válida.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        $salesByReference = $this->get_facturadas_sales_by_references($references);
+        $pages = [];
+        $missingReferences = [];
+        $skippedReferences = [];
+
+        foreach ($references as $reference) {
+            if (!isset($salesByReference[$reference])) {
+                $missingReferences[] = $reference;
+                continue;
+            }
+
+            $saleId = (int) $salesByReference[$reference]->id;
+            try {
+                $pages[] = $this->build_sale_pdf_page($saleId);
+            } catch (Throwable $error) {
+                $skippedReferences[] = $reference;
+                log_message('error', 'Ventas facturadas por referencia: referencia omitida. ref=' . $reference . ' sale_id=' . $saleId . ' error=' . $this->build_facturadas_error_snippet($error));
+            }
+        }
+
+        if (empty($pages)) {
+            $this->session->set_flashdata('warning', 'No se pudo generar el PDF. Verifica que las referencias existan y estén facturadas.');
+            admin_redirect('sales/ventas_facturadas_pdf');
+        }
+
+        if (!empty($missingReferences) || !empty($skippedReferences)) {
+            $summary = 'PDF generado parcialmente.';
+            if (!empty($missingReferences)) {
+                $summary .= ' Sin coincidencia: ' . count($missingReferences) . '.';
+            }
+            if (!empty($skippedReferences)) {
+                $summary .= ' Omitidas por error de render: ' . count($skippedReferences) . '.';
+            }
+            $this->session->set_flashdata('warning', $summary);
+        } else {
+            $this->session->set_flashdata('message', 'PDF generado correctamente por referencias de venta.');
+        }
+
+        $name = 'ventas_facturadas_por_referencia_' . date('Ymd_His') . '.pdf';
+        $this->sma->generate_pdf($pages, $name);
+    }
+
     private function generar_zip_ventas_facturadas($year, $month, $days = null)
     {
         $periodStart = sprintf('%04d-%02d-01 00:00:00', $year, $month);
@@ -1106,6 +1159,49 @@ class Sales extends MY_Controller
             'content' => $html_data,
             'footer'  => $this->data['biller']->invoice_footer,
         ];
+    }
+
+    private function parse_facturadas_references_input($rawReferences)
+    {
+        $parts = preg_split('/[\r\n\t,;]+/', (string) $rawReferences);
+        if (!is_array($parts)) {
+            return [];
+        }
+
+        $cleanReferences = [];
+        foreach ($parts as $part) {
+            $reference = trim((string) $part);
+            if ($reference === '') {
+                continue;
+            }
+            $cleanReferences[$reference] = $reference;
+        }
+
+        return array_values($cleanReferences);
+    }
+
+    private function get_facturadas_sales_by_references(array $references)
+    {
+        if (empty($references)) {
+            return [];
+        }
+
+        $rows = $this->db
+            ->select('id, reference_no')
+            ->from('sales')
+            ->where_in('reference_no', $references)
+            ->where('pos', 1)
+            ->where('factura_id IS NOT NULL', null, false)
+            ->where("TRIM(factura_id) !=", '')
+            ->get()
+            ->result();
+
+        $mapped = [];
+        foreach ($rows as $row) {
+            $mapped[(string) $row->reference_no] = $row;
+        }
+
+        return $mapped;
     }
 
     private function register_facturadas_skip(array &$skippedSales, $saleId, $paymentMethod, $dayDate, Throwable $error, $stage)
