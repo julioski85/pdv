@@ -109,6 +109,32 @@
                 <?= form_close(); ?>
 
                 <hr>
+                <p class="text-muted">Exportación por referencias de venta en un solo PDF:</p>
+                <?php echo admin_form_open('sales/generar_ventas_facturadas_pdf_referencias'); ?>
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="form-group">
+                            <label for="sale-references">Referencias de venta</label>
+                            <textarea
+                                name="sale_references"
+                                id="sale-references"
+                                class="form-control"
+                                rows="8"
+                                placeholder="Pega aquí referencias desde Excel (una por línea o separadas por coma/;)"
+                                required
+                            ></textarea>
+                            <small class="text-muted">Acepta referencias en líneas separadas, tabuladas o separadas por coma/;.</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn btn-info">
+                        <i class="fa fa-files-o"></i> Descargar PDF por referencias
+                    </button>
+                </div>
+                <?= form_close(); ?>
+
+                <hr>
                 <p class="text-muted">Exportación mensual (versión anterior):</p>
                 <?php echo admin_form_open('sales/generar_ventas_facturadas_pdf', ['id' => 'facturadas-monthly-form']); ?>
                 <input type="hidden" name="year" id="legacy-year" value="<?= (int) $selected_year; ?>">
